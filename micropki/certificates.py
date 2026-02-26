@@ -1,8 +1,10 @@
+"""Certificate generation and handling for MicroPKI."""
+
 import re
 from datetime import datetime, timedelta
 from cryptography import x509
 from cryptography.x509.oid import NameOID, ExtensionOID
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 import secrets
 
@@ -107,7 +109,6 @@ def compute_ski(public_key):
     )
     
     # Compute SHA-1 hash
-    from cryptography.hazmat.primitives import serialization
     digest = hashes.Hash(hashes.SHA1(), backend=default_backend())
     digest.update(public_key_der)
     ski = digest.finalize()
@@ -127,6 +128,8 @@ def create_root_ca_certificate(private_key, subject, validity_days):
     Returns:
         bytes: Certificate in DER format
     """
+    from cryptography.hazmat.primitives.asymmetric import rsa, ec
+    
     public_key = private_key.public_key()
     
     # Generate serial number
@@ -140,7 +143,6 @@ def create_root_ca_certificate(private_key, subject, validity_days):
     not_valid_after = not_valid_before + timedelta(days=validity_days)
     
     # Determine signature algorithm
-    from cryptography.hazmat.primitives.asymmetric import rsa, ec
     if isinstance(private_key, rsa.RSAPrivateKey):
         signature_algorithm = hashes.SHA256()
     elif isinstance(private_key, ec.EllipticCurvePrivateKey):
@@ -238,6 +240,3 @@ def get_certificate_info(cert):
         info['key_algorithm'] = "Unknown"
     
     return info
-
-
-from cryptography.hazmat.primitives import serialization

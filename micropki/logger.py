@@ -1,6 +1,8 @@
+"""Logging utilities for MicroPKI."""
+
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class MicroPKILogger:
@@ -11,7 +13,8 @@ class MicroPKILogger:
     
     def _log(self, level, message, *args):
         """Internal logging method with ISO 8601 timestamp."""
-        timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        # Use timezone-aware datetime
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
         formatted_message = message % args if args else message
         log_entry = f"[{timestamp}] {level}: {formatted_message}"
         
