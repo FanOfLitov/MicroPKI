@@ -1,7 +1,7 @@
 """Certificate generation and handling for MicroPKI."""
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from cryptography import x509
 from cryptography.x509.oid import NameOID, ExtensionOID
 from cryptography.hazmat.primitives import hashes, serialization
@@ -77,16 +77,20 @@ def generate_serial_number():
     """
     Generate cryptographically secure serial number.
     
-    Returns 20 bytes (160 bits) of randomness.
+    Returns up to 159 bits of randomness (as per RFC 5280 and cryptography library).
     
     Returns:
         int: Serial number
     """
-    # Generate 20 bytes of randomness
-    random_bytes = secrets.token_bytes(20)
-    # Convert to integer
+    # Generate 159 bits (19 bytes + 7 bits) to comply with RFC 5280
+    # cryptography library requires serial numbers to be no more than 159 bits
+    random_bytes = secrets.token_bytes(20)  # 160 bits
     serial = int.from_bytes(random_bytes, byteorder='big')
-    # Ensure it's positive
+    # Mask to 159 bits
+    serial = serial >> 1  # Shift right by 1 bit to get 159 bits
+    # Ensure it's positive and non-zero
+    if serial == 0:
+        serial = 1
     return serial
 
 
@@ -138,8 +142,8 @@ def create_root_ca_certificate(private_key, subject, validity_days):
     # Compute SKI
     ski = compute_ski(public_key)
     
-    # Set validity period
-    not_valid_before = datetime.utcnow()
+    # Set validity period (timezone-aware)
+    not_valid_before = datetime.now(timezone.utc)
     not_valid_after = not_valid_before + timedelta(days=validity_days)
     
     # Determine signature algorithm
@@ -225,8 +229,8 @@ def get_certificate_info(cert):
         'subject': cert.subject.rfc4514_string(),
         'issuer': cert.issuer.rfc4514_string(),
         'serial_number': format(cert.serial_number, 'x'),
-        'not_before': cert.not_valid_before.isoformat(),
-        'not_after': cert.not_valid_after.isoformat(),
+        'not_before': cert.not_valid_before_utc.isoformat(),
+        'not_after': cert.not_valid_after_utc.isoformat(),
         'signature_algorithm': cert.signature_algorithm_oid._name,
     }
     

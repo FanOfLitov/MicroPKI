@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from micropki.crypto_utils import (
     generate_rsa_key,
@@ -162,7 +162,7 @@ def _generate_policy_document(policy_path, cert_der, config):
 ========================================
 
 Policy Version: 1.0
-Creation Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+Creation Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
 
 CA Information
 --------------
@@ -284,11 +284,11 @@ def verify_certificate(cert_path):
         raise ValueError("Certificate signature verification failed")
     
     # Check validity period
-    now = datetime.utcnow()
-    if now < cert.not_valid_before:
-        raise ValueError(f"Certificate not yet valid (valid from {cert.not_valid_before})")
-    if now > cert.not_valid_after:
-        raise ValueError(f"Certificate expired (valid until {cert.not_valid_after})")
+    now = datetime.now(timezone.utc)
+    if now < cert.not_valid_before_utc:
+        raise ValueError(f"Certificate not yet valid (valid from {cert.not_valid_before_utc})")
+    if now > cert.not_valid_after_utc:
+        raise ValueError(f"Certificate expired (valid until {cert.not_valid_after_utc})")
     
     # Additional checks
     cert_info = get_certificate_info(cert)
