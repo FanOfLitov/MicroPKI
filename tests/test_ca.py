@@ -20,7 +20,7 @@ from micropki.logger import setup_logger
 
 
 class TestCryptoUtils:
-    """Test cryptographic utility functions."""
+
     
     def test_read_passphrase_file(self, tmp_path):
         """Test reading passphrase from file."""
@@ -67,7 +67,6 @@ class TestCryptoUtils:
         save_encrypted_private_key(key, str(key_file), passphrase)
         
         assert key_file.exists()
-        # Verify it's encrypted (contains ENCRYPTED)
         content = key_file.read_text()
         assert "ENCRYPTED" in content
     
@@ -85,7 +84,7 @@ class TestCryptoUtils:
 
 
 class TestCertificates:
-    """Test certificate operations."""
+
     
     def test_parse_subject_slash_notation(self):
         """Test parsing subject DN in slash notation."""

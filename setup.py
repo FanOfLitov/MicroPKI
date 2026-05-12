@@ -16,4 +16,4 @@ setup(
     description="A minimal PKI implementation for educational purposes",
     python_requires='>=3.8',
 )
-EOF
+

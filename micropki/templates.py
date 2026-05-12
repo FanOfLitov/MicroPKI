@@ -1,257 +1,202 @@
+"""Certificate templates and SAN parsing for end-entity certificates.
+
+Three templates are supported: ``server``, ``client``, ``code_signing``.
+Each template defines the correct Key Usage, Extended Key Usage, and
+allowed SAN types per RFC 5280.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+from dataclasses import dataclass, field
+from typing import Sequence
 
 from cryptography import x509
-from cryptography.x509.oid import ExtensionOID, ExtendedKeyUsageOID
-from ipaddress import IPv4Address, IPv6Address, ip_address
+from cryptography.x509.oid import ExtendedKeyUsageOID
 
 
+@dataclass(frozen=True)
+class _KeyUsageSpec:
+    digital_signature: bool = False
+    key_encipherment: bool = False
+    key_agreement: bool = False
+    key_cert_sign: bool = False
+    crl_sign: bool = False
+
+
+@dataclass(frozen=True)
 class CertificateTemplate:
-    """Base class for certificate templates."""
+    name: str
+    key_usage: _KeyUsageSpec
+    extended_key_usage: list[x509.ObjectIdentifier]
+    allowed_san_types: frozenset[str]
+    san_required: bool = False
 
-    def __init__(self, name):
-        self.name = name
-
-    def get_key_usage(self, key_type):
-        """Get KeyUsage extension based on template and key type."""
-        raise NotImplementedError
-
-    def get_extended_key_usage(self):
-        """Get ExtendedKeyUsage OIDs."""
-        raise NotImplementedError
-
-    def get_basic_constraints(self):
-        """Get BasicConstraints extension."""
-        return x509.BasicConstraints(ca=False, path_length=None)
-
-    def validate_san(self, san_entries):
-        """Validate SAN entries for this template."""
-        raise NotImplementedError
+    # For RSA keys, allow key_encipherment override
+    key_usage_rsa_override: _KeyUsageSpec | None = None
 
 
-class ServerTemplate(CertificateTemplate):
-    """Template for TLS server certificates."""
+SERVER_TEMPLATE = CertificateTemplate(
+    name="server",
+    key_usage=_KeyUsageSpec(digital_signature=True),
+    key_usage_rsa_override=_KeyUsageSpec(
+        digital_signature=True,
+        key_encipherment=True,
+    ),
+    extended_key_usage=[ExtendedKeyUsageOID.SERVER_AUTH],
+    allowed_san_types=frozenset({"dns", "ip"}),
+    san_required=True,
+)
 
-    def __init__(self):
-        super().__init__("server")
+CLIENT_TEMPLATE = CertificateTemplate(
+    name="client",
+    key_usage=_KeyUsageSpec(digital_signature=True),
+    extended_key_usage=[ExtendedKeyUsageOID.CLIENT_AUTH],
+    allowed_san_types=frozenset({"dns", "email", "ip", "uri"}),
+    san_required=False,
+)
 
-    def get_key_usage(self, key_type):
-        """Server: digitalSignature + keyEncipherment (RSA only)."""
-        if key_type == "rsa":
-            return x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=True,
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False
-            )
-        else:  # ECC
-            return x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=False,
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False
-            )
+CODE_SIGNING_TEMPLATE = CertificateTemplate(
+    name="code_signing",
+    key_usage=_KeyUsageSpec(digital_signature=True),
+    extended_key_usage=[ExtendedKeyUsageOID.CODE_SIGNING],
+    allowed_san_types=frozenset({"dns", "uri"}),
+    san_required=False,
+)
 
-    def get_extended_key_usage(self):
-        """Server authentication."""
-        return [ExtendedKeyUsageOID.SERVER_AUTH]
-
-    def validate_san(self, san_entries):
-        """Server requires at least one DNS or IP."""
-        valid_types = {'dns', 'ip'}
-        san_types = {entry['type'] for entry in san_entries}
-
-        if not san_types.intersection(valid_types):
-            raise ValueError("Server certificate requires at least one DNS name or IP address in SAN")
-
-        # Check for invalid types
-        invalid = san_types - valid_types
-        if invalid:
-            raise ValueError(f"Server certificate does not support SAN types: {invalid}")
-
-        return True
+TEMPLATES: dict[str, CertificateTemplate] = {
+    "server": SERVER_TEMPLATE,
+    "client": CLIENT_TEMPLATE,
+    "code_signing": CODE_SIGNING_TEMPLATE,
+}
 
 
-class ClientTemplate(CertificateTemplate):
-    """Template for TLS client certificates."""
+def get_template(name: str) -> CertificateTemplate:
+    """Return a template by name, raising ValueError if unknown."""
+    tpl = TEMPLATES.get(name)
+    if tpl is None:
+        raise ValueError(
+            f"Unknown template '{name}'. Available: {', '.join(TEMPLATES)}"
+        )
+    return tpl
 
-    def __init__(self):
-        super().__init__("client")
 
-    def get_key_usage(self, key_type):
-        """Client: digitalSignature (+ optional keyAgreement for ECC)."""
-        if key_type == "ecc":
-            return x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=False,
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=True,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False
-            )
-        else:  # RSA
-            return x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=False,
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False
+@dataclass
+class ParsedSAN:
+    dns_names: list[str] = field(default_factory=list)
+    ip_addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = field(
+        default_factory=list
+    )
+    emails: list[str] = field(default_factory=list)
+    uris: list[str] = field(default_factory=list)
+
+
+def parse_san_strings(san_strings: Sequence[str]) -> ParsedSAN:
+    """Parse SAN entries of the form ``type:value``.
+
+    Supported types: ``dns``, ``ip``, ``email``, ``uri``.
+    """
+    result = ParsedSAN()
+    for entry in san_strings:
+        if ":" not in entry:
+            raise ValueError(f"Invalid SAN format (expected type:value): '{entry}'")
+        san_type, value = entry.split(":", 1)
+        san_type = san_type.strip().lower()
+        value = value.strip()
+        if not value:
+            raise ValueError(f"Empty value for SAN type '{san_type}'")
+
+        if san_type == "dns":
+            result.dns_names.append(value)
+        elif san_type == "ip":
+            try:
+                result.ip_addresses.append(ipaddress.ip_address(value))
+            except ValueError:
+                raise ValueError(f"Invalid IP address in SAN: '{value}'")
+        elif san_type == "email":
+            result.emails.append(value)
+        elif san_type == "uri":
+            result.uris.append(value)
+        else:
+            raise ValueError(
+                f"Unsupported SAN type '{san_type}'. Supported: dns, ip, email, uri"
             )
 
-    def get_extended_key_usage(self):
-        """Client authentication."""
-        return [ExtendedKeyUsageOID.CLIENT_AUTH]
-
-    def validate_san(self, san_entries):
-        """Client should have email or DNS."""
-        valid_types = {'email', 'dns', 'uri'}
-        san_types = {entry['type'] for entry in san_entries}
-
-        invalid = san_types - valid_types
-        if invalid:
-            raise ValueError(f"Client certificate does not support SAN types: {invalid}")
-
-        return True
+    return result
 
 
-class CodeSigningTemplate(CertificateTemplate):
-    """Template for code signing certificates."""
+def validate_san_for_template(
+    template: CertificateTemplate,
+    parsed_san: ParsedSAN,
+) -> list[str]:
+    """Validate that the parsed SAN entries are compatible with the template.
 
-    def __init__(self):
-        super().__init__("code_signing")
+    Returns a list of error messages (empty means valid).
+    """
+    errors: list[str] = []
+    present_types: set[str] = set()
 
-    def get_key_usage(self, key_type):
-        """Code signing: digitalSignature only."""
-        return x509.KeyUsage(
-            digital_signature=True,
-            key_encipherment=False,
-            content_commitment=False,
-            data_encipherment=False,
-            key_agreement=False,
-            key_cert_sign=False,
-            crl_sign=False,
-            encipher_only=False,
-            decipher_only=False
+    if parsed_san.dns_names:
+        present_types.add("dns")
+    if parsed_san.ip_addresses:
+        present_types.add("ip")
+    if parsed_san.emails:
+        present_types.add("email")
+    if parsed_san.uris:
+        present_types.add("uri")
+
+    disallowed = present_types - template.allowed_san_types
+    if disallowed:
+        errors.append(
+            f"Template '{template.name}' does not allow SAN types: "
+            f"{', '.join(sorted(disallowed))}. "
+            f"Allowed: {', '.join(sorted(template.allowed_san_types))}"
         )
 
-    def get_extended_key_usage(self):
-        """Code signing."""
-        return [ExtendedKeyUsageOID.CODE_SIGNING]
+    if template.san_required and not present_types:
+        errors.append(
+            f"Template '{template.name}' requires at least one SAN entry "
+            f"(allowed types: {', '.join(sorted(template.allowed_san_types))})"
+        )
 
-    def validate_san(self, san_entries):
-        """Code signing: DNS and URI allowed, no IP or email."""
-        valid_types = {'dns', 'uri'}
-        san_types = {entry['type'] for entry in san_entries}
-
-        invalid = san_types - valid_types
-        if invalid:
-            raise ValueError(f"Code signing certificate does not support SAN types: {invalid}")
-
-        return True
+    return errors
 
 
-def get_template(template_name):
+def build_san_extension(parsed_san: ParsedSAN) -> x509.SubjectAlternativeName | None:
+    """Build an x509.SubjectAlternativeName extension from parsed SANs.
+
+    Returns None if no SAN entries are present.
     """
-    Get certificate template by name.
+    names: list[x509.GeneralName] = []
 
-    Args:
-        template_name: Template name (server, client, code_signing)
+    for dns in parsed_san.dns_names:
+        names.append(x509.DNSName(dns))
+    for ip_addr in parsed_san.ip_addresses:
+        names.append(x509.IPAddress(ip_addr))
+    for email in parsed_san.emails:
+        names.append(x509.RFC822Name(email))
+    for uri in parsed_san.uris:
+        names.append(x509.UniformResourceIdentifier(uri))
 
-    Returns:
-        CertificateTemplate instance
-
-    Raises:
-        ValueError: If template name is unknown
-    """
-    templates = {
-        'server': ServerTemplate,
-        'client': ClientTemplate,
-        'code_signing': CodeSigningTemplate,
-    }
-
-    if template_name not in templates:
-        raise ValueError(f"Unknown template: {template_name}. Valid templates: {list(templates.keys())}")
-
-    return templates[template_name]()
+    if not names:
+        return None
+    return x509.SubjectAlternativeName(names)
 
 
-def parse_san_entry(san_string):
-    """
-    Parse SAN entry from string format (type:value).
+def build_key_usage(template: CertificateTemplate, is_rsa: bool) -> x509.KeyUsage:
+    """Build a KeyUsage extension based on template and key type."""
+    spec = template.key_usage
+    if is_rsa and template.key_usage_rsa_override is not None:
+        spec = template.key_usage_rsa_override
 
-    Args:
-        san_string: String in format "type:value" (e.g., "dns:example.com")
-
-    Returns:
-        dict: {'type': str, 'value': str/IPAddress}
-
-    Raises:
-        ValueError: If format is invalid
-    """
-    if ':' not in san_string:
-        raise ValueError(f"Invalid SAN format: {san_string}. Expected 'type:value'")
-
-    san_type, san_value = san_string.split(':', 1)
-    san_type = san_type.lower().strip()
-    san_value = san_value.strip()
-
-    valid_types = ['dns', 'ip', 'email', 'uri']
-    if san_type not in valid_types:
-        raise ValueError(f"Invalid SAN type: {san_type}. Valid types: {valid_types}")
-
-    # Validate and convert IP addresses
-    if san_type == 'ip':
-        try:
-            san_value = ip_address(san_value)
-        except ValueError as e:
-            raise ValueError(f"Invalid IP address: {san_value}: {e}")
-
-    return {'type': san_type, 'value': san_value}
-
-
-def build_san_extension(san_entries):
-    """
-    Build SubjectAlternativeName extension from parsed entries.
-
-    Args:
-        san_entries: List of dicts with 'type' and 'value'
-
-    Returns:
-        x509.SubjectAlternativeName extension
-    """
-    general_names = []
-
-    for entry in san_entries:
-        san_type = entry['type']
-        san_value = entry['value']
-
-        if san_type == 'dns':
-            general_names.append(x509.DNSName(san_value))
-        elif san_type == 'ip':
-            general_names.append(x509.IPAddress(san_value))
-        elif san_type == 'email':
-            general_names.append(x509.RFC822Name(san_value))
-        elif san_type == 'uri':
-            general_names.append(x509.UniformResourceIdentifier(san_value))
-
-    if not general_names:
-        raise ValueError("At least one SAN entry is required")
-
-    return x509.SubjectAlternativeName(general_names)
-
-
+    return x509.KeyUsage(
+        digital_signature=spec.digital_signature,
+        key_encipherment=spec.key_encipherment,
+        content_commitment=False,
+        data_encipherment=False,
+        key_agreement=spec.key_agreement,
+        key_cert_sign=spec.key_cert_sign,
+        crl_sign=spec.crl_sign,
+        encipher_only=False,
+        decipher_only=False,
+    )
