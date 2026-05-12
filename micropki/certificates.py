@@ -1,246 +1,263 @@
-"""Certificate generation and handling for MicroPKI."""
+"""X.509 certificate generation for MicroPKI."""
 
-import re
-from datetime import datetime, timedelta, timezone
+from __future__ import annotations
+
+import datetime
+import os
+
 from cryptography import x509
-from cryptography.x509.oid import NameOID, ExtensionOID
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.backends import default_backend
-import secrets
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
+from cryptography.x509.oid import NameOID
+
+from .crypto_utils import parse_subject_dn
+from .templates import (
+    CertificateTemplate,
+    ParsedSAN,
+    build_key_usage,
+    build_san_extension,
+)
+
+_OID_MAP = {
+    "CN": NameOID.COMMON_NAME,
+    "O": NameOID.ORGANIZATION_NAME,
+    "OU": NameOID.ORGANIZATIONAL_UNIT_NAME,
+    "C": NameOID.COUNTRY_NAME,
+    "ST": NameOID.STATE_OR_PROVINCE_NAME,
+    "L": NameOID.LOCALITY_NAME,
+    "EMAIL": NameOID.EMAIL_ADDRESS,
+    "EMAILADDRESS": NameOID.EMAIL_ADDRESS,
+}
 
 
-def parse_subject_dn(subject_string):
-    """
-    Parse subject Distinguished Name from string.
-    
-    Supports both formats:
-    - Slash notation: /CN=Root CA/O=MicroPKI/C=US
-    - Comma notation: CN=Root CA,O=MicroPKI,C=US
-    
-    Args:
-        subject_string: DN string
-    
-    Returns:
-        x509.Name object
-    
-    Raises:
-        ValueError: If DN is invalid or CN is missing
-    """
-    # Remove leading slash if present
-    subject_string = subject_string.lstrip('/')
-    
-    # Determine separator
-    if '/' in subject_string:
-        components = subject_string.split('/')
-    else:
-        components = subject_string.split(',')
-    
-    attributes = []
-    
-    for component in components:
-        component = component.strip()
-        if not component:
-            continue
-        
-        if '=' not in component:
-            raise ValueError(f"Invalid DN component: {component}")
-        
-        key, value = component.split('=', 1)
-        key = key.strip().upper()
-        value = value.strip()
-        
-        if not value:
-            raise ValueError(f"Empty value for {key}")
-        
-        # Map to OIDs
-        oid_map = {
-            'CN': NameOID.COMMON_NAME,
-            'O': NameOID.ORGANIZATION_NAME,
-            'OU': NameOID.ORGANIZATIONAL_UNIT_NAME,
-            'C': NameOID.COUNTRY_NAME,
-            'ST': NameOID.STATE_OR_PROVINCE_NAME,
-            'L': NameOID.LOCALITY_NAME,
-        }
-        
-        if key not in oid_map:
+def build_x509_name(dn: dict[str, str]) -> x509.Name:
+    """Convert a parsed DN dict into an :class:`x509.Name`."""
+    attrs = []
+    for key, value in dn.items():
+        oid = _OID_MAP.get(key)
+        if oid is None:
             raise ValueError(f"Unsupported DN attribute: {key}")
-        
-        attributes.append(x509.NameAttribute(oid_map[key], value))
-    
-    if not any(attr.oid == NameOID.COMMON_NAME for attr in attributes):
-        raise ValueError("CN (Common Name) is required in subject DN")
-    
-    return x509.Name(attributes)
+        attrs.append(x509.NameAttribute(oid, value))
+    return x509.Name(attrs)
 
 
-def generate_serial_number():
-    """
-    Generate cryptographically secure serial number.
-    
-    Returns up to 159 bits of randomness (as per RFC 5280 and cryptography library).
-    
-    Returns:
-        int: Serial number
-    """
-    # Generate 159 bits (19 bytes + 7 bits) to comply with RFC 5280
-    # cryptography library requires serial numbers to be no more than 159 bits
-    random_bytes = secrets.token_bytes(20)  # 160 bits
-    serial = int.from_bytes(random_bytes, byteorder='big')
-    # Mask to 159 bits
-    serial = serial >> 1  # Shift right by 1 bit to get 159 bits
-    # Ensure it's positive and non-zero
-    if serial == 0:
-        serial = 1
-    return serial
+def create_self_signed_cert(
+    private_key: PrivateKeyTypes,
+    subject_str: str,
+    validity_days: int,
+    serial_number: int | None = None,
+) -> x509.Certificate:
+    """Create a self-signed Root CA certificate (X.509 v3).
 
-
-def compute_ski(public_key):
+    Extensions:
+    - BasicConstraints(CA=TRUE, critical)
+    - KeyUsage(keyCertSign, cRLSign, digitalSignature, critical)
+    - SubjectKeyIdentifier
+    - AuthorityKeyIdentifier (= SKI for self-signed)
     """
-    Compute Subject Key Identifier from public key.
-    
-    Uses SHA-1 hash of the public key as per RFC 5280.
-    
-    Args:
-        public_key: Public key object
-    
-    Returns:
-        bytes: SKI value
-    """
-    # Serialize public key to DER
-    public_key_der = public_key.public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    
-    # Compute SHA-1 hash
-    digest = hashes.Hash(hashes.SHA1(), backend=default_backend())
-    digest.update(public_key_der)
-    ski = digest.finalize()
-    
-    return ski
-
-
-def create_root_ca_certificate(private_key, subject, validity_days):
-    """
-    Create self-signed Root CA certificate.
-    
-    Args:
-        private_key: Private key (RSA or ECC)
-        subject: x509.Name object
-        validity_days: Certificate validity period in days
-    
-    Returns:
-        bytes: Certificate in DER format
-    """
-    from cryptography.hazmat.primitives.asymmetric import rsa, ec
-    
+    dn = parse_subject_dn(subject_str)
+    name = build_x509_name(dn)
     public_key = private_key.public_key()
-    
-    # Generate serial number
-    serial_number = generate_serial_number()
-    
-    # Compute SKI
-    ski = compute_ski(public_key)
-    
-    # Set validity period (timezone-aware)
-    not_valid_before = datetime.now(timezone.utc)
-    not_valid_after = not_valid_before + timedelta(days=validity_days)
-    
-    # Determine signature algorithm
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    not_after = now + datetime.timedelta(days=validity_days)
+
+    ski = x509.SubjectKeyIdentifier.from_public_key(public_key)
+
     if isinstance(private_key, rsa.RSAPrivateKey):
-        signature_algorithm = hashes.SHA256()
+        sign_algo = hashes.SHA256()
     elif isinstance(private_key, ec.EllipticCurvePrivateKey):
-        signature_algorithm = hashes.SHA384()
+        sign_algo = hashes.SHA384()
     else:
-        raise ValueError("Unsupported key type")
-    
-    # Build certificate
-    builder = x509.CertificateBuilder()
-    builder = builder.subject_name(subject)
-    builder = builder.issuer_name(subject)  # Self-signed
-    builder = builder.public_key(public_key)
-    builder = builder.serial_number(serial_number)
-    builder = builder.not_valid_before(not_valid_before)
-    builder = builder.not_valid_after(not_valid_after)
-    
-    # Add extensions
-    # Basic Constraints (critical)
-    builder = builder.add_extension(
-        x509.BasicConstraints(ca=True, path_length=None),
-        critical=True
+        raise ValueError(f"Unsupported key type: {type(private_key)}")
+
+    serial_number = serial_number or x509.random_serial_number()
+
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(public_key)
+        .serial_number(serial_number)
+        .not_valid_before(now)
+        .not_valid_after(not_after)
+        .add_extension(
+            x509.BasicConstraints(ca=True, path_length=None),
+            critical=True,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=True,
+                crl_sign=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(ski, critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ski),
+            critical=False,
+        )
     )
-    
-    # Key Usage (critical)
-    builder = builder.add_extension(
-        x509.KeyUsage(
-            digital_signature=True,
-            key_encipherment=False,
-            content_commitment=False,
-            data_encipherment=False,
-            key_agreement=False,
-            key_cert_sign=True,
-            crl_sign=True,
-            encipher_only=False,
-            decipher_only=False
-        ),
-        critical=True
-    )
-    
-    # Subject Key Identifier
-    builder = builder.add_extension(
-        x509.SubjectKeyIdentifier(ski),
-        critical=False
-    )
-    
-    # Authority Key Identifier (same as SKI for self-signed)
-    builder = builder.add_extension(
-        x509.AuthorityKeyIdentifier(
-            key_identifier=ski,
-            authority_cert_issuer=None,
-            authority_cert_serial_number=None
-        ),
-        critical=False
-    )
-    
-    # Sign certificate
-    certificate = builder.sign(
-        private_key=private_key,
-        algorithm=signature_algorithm,
-        backend=default_backend()
-    )
-    
-    # Return DER encoding
-    return certificate.public_bytes(serialization.Encoding.DER)
+
+    return builder.sign(private_key, sign_algo)
 
 
-def get_certificate_info(cert):
+def serialize_certificate(cert: x509.Certificate) -> bytes:
+    """Serialize a certificate to PEM format."""
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
+def save_certificate(pem_data: bytes, path: str) -> None:
+    """Write certificate PEM to *path*, creating parent dirs as needed."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(pem_data)
+
+
+def load_certificate(path: str) -> x509.Certificate:
+    """Load a PEM certificate from disk."""
+    with open(path, "rb") as f:
+        return x509.load_pem_x509_certificate(f.read())
+
+
+def _pick_hash(signing_key: PrivateKeyTypes) -> hashes.HashAlgorithm:
+    """Choose the hash algorithm based on the signing key type."""
+    if isinstance(signing_key, rsa.RSAPrivateKey):
+        return hashes.SHA256()
+    elif isinstance(signing_key, ec.EllipticCurvePrivateKey):
+        return hashes.SHA384()
+    raise ValueError(f"Unsupported key type: {type(signing_key)}")
+
+
+def sign_intermediate_certificate(
+    csr: x509.CertificateSigningRequest,
+    root_key: PrivateKeyTypes,
+    root_cert: x509.Certificate,
+    validity_days: int,
+    path_length: int = 0,
+    serial_number: int | None = None,
+) -> x509.Certificate:
+    """Sign an Intermediate CA CSR with the Root CA.
+
+    The resulting certificate includes:
+    - BasicConstraints(CA=TRUE, pathLenConstraint), critical
+    - KeyUsage(keyCertSign, cRLSign), critical
+    - SKI from the CSR public key
+    - AKI from the Root CA's SKI
     """
-    Extract key information from certificate.
-    
-    Args:
-        cert: x509.Certificate object
-    
-    Returns:
-        dict: Certificate information
+    now = datetime.datetime.now(datetime.timezone.utc)
+    not_after = now + datetime.timedelta(days=validity_days)
+
+    public_key = csr.public_key()
+    ski = x509.SubjectKeyIdentifier.from_public_key(public_key)
+
+    root_ski = root_cert.extensions.get_extension_for_class(
+        x509.SubjectKeyIdentifier
+    )
+
+    serial_number = serial_number or x509.random_serial_number()
+
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(csr.subject)
+        .issuer_name(root_cert.subject)
+        .public_key(public_key)
+        .serial_number(serial_number)
+        .not_valid_before(now)
+        .not_valid_after(not_after)
+        .add_extension(
+            x509.BasicConstraints(ca=True, path_length=path_length),
+            critical=True,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(ski, critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                root_ski.value
+            ),
+            critical=False,
+        )
+    )
+
+    return builder.sign(root_key, _pick_hash(root_key))
+
+
+def sign_end_entity_certificate(
+    public_key,
+    subject_name: x509.Name,
+    ca_key: PrivateKeyTypes,
+    ca_cert: x509.Certificate,
+    template: CertificateTemplate,
+    parsed_san: ParsedSAN,
+    validity_days: int,
+    serial_number: int | None = None,
+) -> x509.Certificate:
+    """Sign an end-entity certificate using the CA key.
+
+    Extensions are determined by the template and SAN configuration.
     """
-    from cryptography.hazmat.primitives.asymmetric import rsa, ec
-    
-    info = {
-        'subject': cert.subject.rfc4514_string(),
-        'issuer': cert.issuer.rfc4514_string(),
-        'serial_number': format(cert.serial_number, 'x'),
-        'not_before': cert.not_valid_before_utc.isoformat(),
-        'not_after': cert.not_valid_after_utc.isoformat(),
-        'signature_algorithm': cert.signature_algorithm_oid._name,
-    }
-    
-    # Determine key algorithm
-    public_key = cert.public_key()
-    if isinstance(public_key, rsa.RSAPublicKey):
-        info['key_algorithm'] = f"RSA-{public_key.key_size}"
-    elif isinstance(public_key, ec.EllipticCurvePublicKey):
-        info['key_algorithm'] = f"ECC-{public_key.curve.name}"
-    else:
-        info['key_algorithm'] = "Unknown"
-    
-    return info
+    now = datetime.datetime.now(datetime.timezone.utc)
+    not_after = now + datetime.timedelta(days=validity_days)
+
+    ski = x509.SubjectKeyIdentifier.from_public_key(public_key)
+    ca_ski = ca_cert.extensions.get_extension_for_class(
+        x509.SubjectKeyIdentifier
+    )
+
+    is_rsa = isinstance(public_key, rsa.RSAPublicKey)
+    key_usage = build_key_usage(template, is_rsa)
+
+    serial_number = serial_number or x509.random_serial_number()
+
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject_name)
+        .issuer_name(ca_cert.subject)
+        .public_key(public_key)
+        .serial_number(serial_number)
+        .not_valid_before(now)
+        .not_valid_after(not_after)
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None),
+            critical=True,
+        )
+        .add_extension(key_usage, critical=True)
+        .add_extension(
+            x509.ExtendedKeyUsage(template.extended_key_usage),
+            critical=False,
+        )
+        .add_extension(ski, critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                ca_ski.value
+            ),
+            critical=False,
+        )
+    )
+
+    san_ext = build_san_extension(parsed_san)
+    if san_ext is not None:
+        builder = builder.add_extension(san_ext, critical=False)
+
+    return builder.sign(ca_key, _pick_hash(ca_key))

@@ -1,68 +1,33 @@
-"""Logging utilities for MicroPKI."""
-
 import logging
+import os
 import sys
-from datetime import datetime, timezone
 
 
-class MicroPKILogger:
-    """Custom logger for MicroPKI with timestamp and level formatting."""
-    
-    def __init__(self, logger):
-        self.logger = logger
-    
-    def _log(self, level, message, *args):
-        """Internal logging method with ISO 8601 timestamp."""
-        # Use timezone-aware datetime
-        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-        formatted_message = message % args if args else message
-        log_entry = f"[{timestamp}] {level}: {formatted_message}"
-        
-        if level == "INFO":
-            self.logger.info(log_entry)
-        elif level == "WARNING":
-            self.logger.warning(log_entry)
-        elif level == "ERROR":
-            self.logger.error(log_entry)
-    
-    def info(self, message, *args):
-        """Log info message."""
-        self._log("INFO", message, *args)
-    
-    def warning(self, message, *args):
-        """Log warning message."""
-        self._log("WARNING", message, *args)
-    
-    def error(self, message, *args):
-        """Log error message."""
-        self._log("ERROR", message, *args)
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 
-def setup_logger(log_file=None):
-    """
-    Setup and configure logger.
-    
-    Args:
-        log_file: Path to log file. If None, logs to stderr.
-    
-    Returns:
-        MicroPKILogger instance
-    """
-    logger = logging.getLogger('micropki')
-    logger.setLevel(logging.INFO)
-    
-    # Remove existing handlers
+class _MillisecondFormatter(logging.Formatter):
+
+    default_msec_format = "%s.%03d"
+
+
+def setup_logging(log_file: str | None = None, level: int = logging.INFO) -> logging.Logger:
+
+    logger = logging.getLogger("micropki")
+    logger.setLevel(level)
     logger.handlers.clear()
-    
-    # Create handler
+
+    formatter = _MillisecondFormatter(LOG_FORMAT, datefmt=DATE_FORMAT)
+
     if log_file:
-        handler = logging.FileHandler(log_file, mode='a')
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
     else:
         handler = logging.StreamHandler(sys.stderr)
-    
-    # Simple format (timestamp added by MicroPKILogger)
-    formatter = logging.Formatter('%(message)s')
+
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    
-    return MicroPKILogger(logger)
+    return logger
