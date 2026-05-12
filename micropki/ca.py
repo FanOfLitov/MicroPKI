@@ -1,771 +1,666 @@
+"""CA operations: Root CA init, Intermediate CA issuance, certificate issuance.
+
+Orchestrates key generation, certificate creation, key storage,
+policy document writing, and logging.
+"""
+
+from __future__ import annotations
+
+import datetime
+import logging
 import os
-from pathlib import Path
-from datetime import datetime, timezone
+import re
 
-from micropki.crypto_utils import (
-    generate_rsa_key,
-    generate_ecc_key,
-    save_encrypted_private_key,
-    save_certificate_pem,
-    load_certificate_pem
+from .certificates import (
+    build_x509_name,
+    create_self_signed_cert,
+    load_certificate,
+    save_certificate,
+    serialize_certificate,
+    sign_end_entity_certificate,
+    sign_intermediate_certificate,
 )
-from micropki.certificates import (
+from .csr import generate_csr, serialize_csr
+from .crypto_utils import (
+    generate_key,
+    load_private_key,
     parse_subject_dn,
-    create_root_ca_certificate,
-    get_certificate_info
+    save_private_key,
+    serialize_private_key,
+    serialize_private_key_unencrypted,
+)
+from .templates import (
+    ParsedSAN,
+    get_template,
+    parse_san_strings,
+    validate_san_for_template,
 )
 
 
-def init_root_ca(config):
-    """
-    Initialize Root CA with given configuration.
-    
-    Args:
-        config: Dictionary with keys:
-            - subject: DN string
-            - key_type: 'rsa' or 'ecc'
-            - key_size: Key size in bits
-            - passphrase: Passphrase bytes
-            - out_dir: Output directory path
-            - validity_days: Certificate validity in days
-            - force: Overwrite existing files
-            - logger: Logger instance
-    
-    Raises:
-        Exception: If CA initialization fails
-    """
-    logger = config['logger']
-    
-    logger.info("Starting Root CA initialization")
-    logger.info("Subject: %s", config['subject'])
-    logger.info("Key type: %s-%d", config['key_type'], config['key_size'])
-    
-    # Create directory structure
-    out_dir = Path(config['out_dir'])
-    private_dir = out_dir / 'private'
-    certs_dir = out_dir / 'certs'
-    
-    _create_directory_structure(out_dir, private_dir, certs_dir, config['force'], logger)
-    
-    # Parse subject DN
-    try:
-        subject = parse_subject_dn(config['subject'])
-        logger.info("Subject DN parsed successfully")
-    except Exception as e:
-        logger.error("Failed to parse subject DN: %s", str(e))
-        raise
-    
-    # Generate private key
-    logger.info("Generating %s private key (%d bits)...", config['key_type'], config['key_size'])
-    try:
-        if config['key_type'] == 'rsa':
-            private_key = generate_rsa_key(config['key_size'])
-        elif config['key_type'] == 'ecc':
-            private_key = generate_ecc_key(config['key_size'])
-        else:
-            raise ValueError(f"Unsupported key type: {config['key_type']}")
-        
-        logger.info("Private key generated successfully")
-    except Exception as e:
-        logger.error("Failed to generate private key: %s", str(e))
-        raise
-    
-    # Create self-signed certificate
-    logger.info("Creating self-signed Root CA certificate...")
-    try:
-        cert_der = create_root_ca_certificate(
-            private_key,
-            subject,
-            config['validity_days']
-        )
-        logger.info("Certificate created successfully")
-    except Exception as e:
-        logger.error("Failed to create certificate: %s", str(e))
-        raise
-    
-    # Save encrypted private key
-    key_path = private_dir / 'ca.key.pem'
-    logger.info("Saving encrypted private key to %s", key_path)
-    try:
-        save_encrypted_private_key(
-            private_key,
-            str(key_path),
-            config['passphrase']
-        )
-        logger.info("Private key saved successfully")
-    except Exception as e:
-        logger.error("Failed to save private key: %s", str(e))
-        raise
-    
-    # Save certificate
-    cert_path = certs_dir / 'ca.cert.pem'
-    logger.info("Saving certificate to %s", cert_path)
-    try:
-        save_certificate_pem(cert_der, str(cert_path))
-        logger.info("Certificate saved successfully")
-    except Exception as e:
-        logger.error("Failed to save certificate: %s", str(e))
-        raise
-    
-    # Generate policy document
-    policy_path = out_dir / 'policy.txt'
-    logger.info("Generating policy document at %s", policy_path)
-    try:
-        _generate_policy_document(policy_path, cert_der, config)
-        logger.info("Policy document generated successfully")
-    except Exception as e:
-        logger.error("Failed to generate policy document: %s", str(e))
-        raise
-    
-    logger.info("Root CA initialization completed successfully")
+def _derive_db_path(out_dir: str) -> str:
+    """Derive default DB path from output directory."""
+    base_dir = out_dir
+    if os.path.basename(os.path.normpath(out_dir)) == "certs":
+        base_dir = os.path.dirname(out_dir)
+    return os.path.join(base_dir, "micropki.db")
 
 
-def _create_directory_structure(out_dir, private_dir, certs_dir, force, logger):
-    """Create PKI directory structure with appropriate permissions."""
-    # Check for existing files
-    if not force:
-        key_file = private_dir / 'ca.key.pem'
-        cert_file = certs_dir / 'ca.cert.pem'
-        
-        if key_file.exists():
-            raise FileExistsError(
-                f"CA key already exists at {key_file} (use --force to overwrite)"
-            )
-        if cert_file.exists():
-            raise FileExistsError(
-                f"CA certificate already exists at {cert_file} (use --force to overwrite)"
-            )
-    
-    # Create directories
-    for directory in [out_dir, private_dir, certs_dir]:
-        directory.mkdir(parents=True, exist_ok=True)
-    
-    # Set permissions on private directory
-    try:
-        os.chmod(private_dir, 0o700)
-        logger.info("Set permissions 0700 on %s", private_dir)
-    except Exception as e:
-        logger.warning("Could not set directory permissions: %s", str(e))
-    
-    logger.info("Created directory structure in %s", out_dir)
-
-
-def _generate_policy_document(policy_path, cert_der, config):
-    """Generate certificate policy document."""
-    from cryptography import x509
-    from cryptography.hazmat.backends import default_backend
-    
-    cert = x509.load_der_x509_certificate(cert_der, default_backend())
-    cert_info = get_certificate_info(cert)
-    
-    policy_content = f"""MicroPKI Certificate Policy Document
-========================================
-
-Policy Version: 1.0
-Creation Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
-
-CA Information
---------------
-CA Name: {cert_info['subject']}
-Serial Number: {cert_info['serial_number']}
-Key Algorithm: {cert_info['key_algorithm']}
-Signature Algorithm: {cert_info['signature_algorithm']}
-
-Validity Period
----------------
-Not Before: {cert_info['not_before']}
-Not After: {cert_info['not_after']}
-
-Purpose
--------
-This is a Root Certificate Authority for the MicroPKI demonstration project.
-It serves as the trust anchor for all certificates issued within this PKI.
-
-Key Usage
----------
-- Certificate Signing (keyCertSign)
-- CRL Signing (cRLSign)
-- Digital Signature (digitalSignature)
-
-Certificate Policy
-------------------
-- Minimum key sizes: RSA-4096, ECC-P384
-- Maximum certificate validity:
-  * Root CA: 10 years (3650 days)
-  * Intermediate CA: 5 years (1825 days)
-  * End-entity: 1 year (365 days)
-- All private keys must be encrypted at rest
-- Revocation checking via CRL and OCSP is mandatory
-
-Security Controls
------------------
-- Private keys stored encrypted with AES-256-CBC (PKCS#8)
-- File permissions: private keys (0600), private directory (0700)
-- Cryptographically secure random number generation (secrets module)
-- Comprehensive audit logging of all operations
-- Passphrase protection for all private keys
-
-Compliance
-----------
-- X.509 v3 certificate format (RFC 5280)
-- PKCS#8 encrypted private key storage
-- SHA-256 signature algorithm for RSA keys
-- SHA-384 signature algorithm for ECC keys
-
-Limitations
------------
-This PKI implementation is for EDUCATIONAL PURPOSES ONLY.
-It is not intended for production use.
-
-Contact Information
--------------------
-Project: MicroPKI
-Repository: https://github.com/FanOfLitov/MicroPKI
-Author: FanOfLitov
-"""
-    
-    with open(policy_path, 'w', encoding='utf-8') as f:
-        f.write(policy_content)
-
-
-def verify_certificate(cert_path):
-    """
-    Verify a certificate (self-signed for Root CA).
-    
-    Args:
-        cert_path: Path to certificate file
-    
-    Raises:
-        Exception: If verification fails
-    """
-    from cryptography import x509
-    from cryptography.hazmat.backends import default_backend
-    from cryptography.hazmat.primitives.asymmetric import rsa, ec
-    from cryptography.exceptions import InvalidSignature
-    
-    # Load certificate
-    cert = load_certificate_pem(cert_path)
-    
-    # Check if it's a CA certificate
-    try:
-        basic_constraints = cert.extensions.get_extension_for_oid(
-            x509.oid.ExtensionOID.BASIC_CONSTRAINTS
-        )
-        if not basic_constraints.value.ca:
-            raise ValueError("Certificate is not a CA certificate")
-    except x509.ExtensionNotFound:
-        raise ValueError("Certificate does not have Basic Constraints extension")
-    
-    # For self-signed certificate, verify signature using its own public key
-    public_key = cert.public_key()
-    
-    try:
-        if isinstance(public_key, rsa.RSAPublicKey):
-            from cryptography.hazmat.primitives.asymmetric import padding
-            from cryptography.hazmat.primitives import hashes
-            
-            public_key.verify(
-                cert.signature,
-                cert.tbs_certificate_bytes,
-                padding.PKCS1v15(),
-                cert.signature_hash_algorithm
-            )
-        elif isinstance(public_key, ec.EllipticCurvePublicKey):
-            from cryptography.hazmat.primitives import hashes
-            
-            public_key.verify(
-                cert.signature,
-                cert.tbs_certificate_bytes,
-                ec.ECDSA(cert.signature_hash_algorithm)
-            )
-        else:
-            raise ValueError("Unsupported key type")
-    except InvalidSignature:
-        raise ValueError("Certificate signature verification failed")
-    
-    # Check validity period
-    now = datetime.now(timezone.utc)
-    if now < cert.not_valid_before_utc:
-        raise ValueError(f"Certificate not yet valid (valid from {cert.not_valid_before_utc})")
-    if now > cert.not_valid_after_utc:
-        raise ValueError(f"Certificate expired (valid until {cert.not_valid_after_utc})")
-    
-    # Additional checks
-    cert_info = get_certificate_info(cert)
-    print(f"\nCertificate Details:")
-    print(f"  Subject: {cert_info['subject']}")
-    print(f"  Issuer: {cert_info['issuer']}")
-    print(f"  Serial: {cert_info['serial_number']}")
-    print(f"  Valid from: {cert_info['not_before']}")
-    print(f"  Valid until: {cert_info['not_after']}")
-    print(f"  Key algorithm: {cert_info['key_algorithm']}")
-    print(f"  Signature algorithm: {cert_info['signature_algorithm']}")
-    print(f"  Is CA: Yes")
-
-
-def create_intermediate_ca(root_cert_path, root_key_path, root_passphrase,
-                           subject, key_type, key_size, passphrase,
-                           out_dir, validity_days, path_length, logger):
-    """
-    Create an Intermediate CA signed by Root CA.
+def init_root_ca(
+        subject_str: str,
+        key_type: str,
+        key_size: int,
+        passphrase: bytes,
+        out_dir: str,
+        validity_days: int,
+        logger: logging.Logger,
+        serial_generator=None,
+) -> None:
+    """Create a self-signed Root CA: key pair, certificate, policy file.
 
     Args:
-        root_cert_path: Path to Root CA certificate
-        root_key_path: Path to Root CA private key
-        root_passphrase: Root CA key passphrase
-        subject: Intermediate CA subject DN
-        key_type: Key type (rsa/ecc)
-        key_size: Key size
-        passphrase: Intermediate CA key passphrase
-        out_dir: Output directory
-        validity_days: Certificate validity in days
-        path_length: Path length constraint
-        logger: Logger instance
-
-    Returns:
-        dict: Paths to created files
+        subject_str: Distinguished Name string.
+        key_type: ``'rsa'`` or ``'ecc'``.
+        key_size: 4096 (RSA) or 384 (ECC).
+        passphrase: Passphrase bytes for private key encryption.
+        out_dir: Output directory.
+        validity_days: Certificate validity in days.
+        logger: Logger instance.
     """
-    from pathlib import Path
-    from cryptography.hazmat.primitives import serialization
+    key_path = os.path.join(out_dir, "private", "ca.key.pem")
+    cert_path = os.path.join(out_dir, "certs", "ca.cert.pem")
+    policy_path = os.path.join(out_dir, "policy.txt")
 
-    logger.info("Starting Intermediate CA creation")
-    logger.info("Subject: %s", subject)
-    logger.info("Key type: %s-%d", key_type, key_size)
-    logger.info("Path length constraint: %s", path_length)
+    logger.info("Starting key generation (%s, %d bits)...", key_type.upper(), key_size)
+    private_key = generate_key(key_type, key_size)
+    logger.info("Key generation completed successfully.")
 
-    # Load Root CA certificate and key
-    logger.info("Loading Root CA certificate from %s", root_cert_path)
-    root_cert = load_certificate_pem(root_cert_path)
-
-    logger.info("Loading Root CA private key")
-    with open(root_key_path, 'rb') as f:
-        root_key_pem = f.read()
-
-    # Decrypt Root CA private key
-    root_key = serialization.load_pem_private_key(
-        root_key_pem,
-        password=root_passphrase,
-        backend=default_backend()
+    logger.info("Starting certificate signing (self-signed Root CA)...")
+    serial_number = serial_generator.generate() if serial_generator is not None else None
+    cert = create_self_signed_cert(
+        private_key,
+        subject_str,
+        validity_days,
+        serial_number=serial_number,
     )
-    logger.info("Root CA private key loaded successfully")
+    logger.info("Certificate signing completed successfully.")
 
-    # Generate Intermediate CA key pair
-    logger.info("Generating Intermediate CA private key...")
-    if key_type == 'rsa':
-        from micropki.crypto_utils import generate_rsa_key
-        intermediate_key = generate_rsa_key(key_size)
-    elif key_type == 'ecc':
-        from micropki.crypto_utils import generate_ecc_key
-        intermediate_key = generate_ecc_key(key_size)
-    else:
-        raise ValueError(f"Unsupported key type: {key_type}")
+    key_pem = serialize_private_key(private_key, passphrase)
+    save_private_key(key_pem, key_path)
+    logger.info("Private key saved to %s", os.path.abspath(key_path))
 
-    logger.info("Intermediate CA private key generated")
+    cert_pem = serialize_certificate(cert)
+    save_certificate(cert_pem, cert_path)
+    logger.info("Certificate saved to %s", os.path.abspath(cert_path))
 
-    # Generate CSR
-    logger.info("Generating CSR for Intermediate CA...")
-    from micropki.csr import generate_csr
-    csr_pem = generate_csr(
-        intermediate_key,
-        subject,
-        is_ca=True,
-        path_length=path_length
+    _write_policy(cert, key_type, key_size, policy_path)
+    logger.info("Policy document saved to %s", os.path.abspath(policy_path))
+
+    from .audit import AuditLogger
+    audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+    audit_logger.log("init_root_ca", {
+        "subject": subject_str,
+        "serial": format(cert.serial_number, "X")
+    })
+
+    logger.info("Root CA initialisation completed successfully.")
+
+
+def _write_policy(
+        cert,
+        key_type: str,
+        key_size: int,
+        path: str,
+) -> None:
+    """Write a human-readable policy.txt."""
+    subject = cert.subject.rfc4514_string()
+    serial_hex = format(cert.serial_number, "X")
+    not_before = cert.not_valid_before_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    not_after = cert.not_valid_after_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    algo_label = f"{key_type.upper()}-{key_size}"
+    creation_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    content = (
+        "========================================\n"
+        "  MicroPKI — Certificate Policy Document\n"
+        "========================================\n"
+        "\n"
+        f"CA Name (Subject DN): {subject}\n"
+        f"Certificate Serial Number: {serial_hex}\n"
+        f"Validity Period:\n"
+        f"  Not Before: {not_before}\n"
+        f"  Not After:  {not_after}\n"
+        f"Key Algorithm and Size: {algo_label}\n"
+        "\n"
+        "Purpose:\n"
+        "  Root CA for MicroPKI demonstration.\n"
+        "  This certificate is the trust anchor for the entire PKI hierarchy.\n"
+        "\n"
+        f"Policy Version: 1.0\n"
+        f"Creation Date: {creation_date}\n"
     )
 
-    # Save CSR
-    out_path = Path(out_dir)
-    csr_dir = out_path / 'csrs'
-    csr_dir.mkdir(parents=True, exist_ok=True)
-    csr_path = csr_dir / 'intermediate.csr.pem'
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
 
-    with open(csr_path, 'wb') as f:
-        f.write(csr_pem)
-    logger.info("CSR saved to %s", csr_path)
 
-    # Sign CSR with Root CA
-    logger.info("Signing Intermediate CA certificate with Root CA...")
-    from micropki.certificates import (
-        parse_subject_dn,
-        generate_serial_number,
-        compute_ski
+def issue_intermediate_ca(
+        root_cert_path: str,
+        root_key_path: str,
+        root_passphrase: bytes,
+        subject_str: str,
+        key_type: str,
+        key_size: int,
+        passphrase: bytes,
+        out_dir: str,
+        validity_days: int,
+        path_length: int,
+        logger: logging.Logger,
+        serial_generator=None,
+) -> None:
+    """Generate an Intermediate CA signed by the Root CA."""
+    root_cert = load_certificate(root_cert_path)
+
+    with open(root_key_path, "rb") as f:
+        root_key = load_private_key(f.read(), root_passphrase)
+
+    logger.info(
+        "Generating Intermediate CA key pair (%s, %d bits)...",
+        key_type.upper(),
+        key_size,
     )
-    from datetime import timedelta
+    inter_key = generate_key(key_type, key_size)
+    logger.info("Intermediate CA key generation completed.")
 
-    # Parse CSR
-    csr = x509.load_pem_x509_csr(csr_pem, default_backend())
-    intermediate_subject = parse_subject_dn(subject)
-    intermediate_public_key = csr.public_key()
+    logger.info("Generating Intermediate CA CSR...")
+    csr = generate_csr(
+        inter_key, subject_str, is_ca=True, path_length=path_length
+    )
+    logger.info("Intermediate CA CSR generated for subject: %s", subject_str)
 
-    # Generate serial number
-    serial_number = generate_serial_number()
+    csr_dir = os.path.join(out_dir, "csrs")
+    os.makedirs(csr_dir, exist_ok=True)
+    csr_path = os.path.join(csr_dir, "intermediate.csr.pem")
+    with open(csr_path, "wb") as f:
+        f.write(serialize_csr(csr))
+    logger.info("CSR saved to %s", os.path.abspath(csr_path))
 
-    # Compute SKI and AKI
-    intermediate_ski = compute_ski(intermediate_public_key)
+    logger.info("Root CA signing Intermediate CA certificate...")
+    serial_number = serial_generator.generate() if serial_generator is not None else None
+    inter_cert = sign_intermediate_certificate(
+        csr,
+        root_key,
+        root_cert,
+        validity_days,
+        path_length,
+        serial_number=serial_number,
+    )
+    logger.info(
+        "Intermediate CA certificate signed. Serial: %s",
+        format(inter_cert.serial_number, "X"),
+    )
 
-    # Get Root CA SKI for AKI
+    # Sprint 3: store issued certificate in DB before writing any certificate/key files.
+    from .database import CertificateDatabase
+
+    cert_db = CertificateDatabase(_derive_db_path(out_dir))
+    cert_db.connect()
+    cert_db.init_schema()
+
+    serial_hex = format(inter_cert.serial_number, "X")
+    subject_dn = inter_cert.subject.rfc4514_string()
+    issuer_dn = inter_cert.issuer.rfc4514_string()
+    not_before = inter_cert.not_valid_before_utc.isoformat()
+    not_after = inter_cert.not_valid_after_utc.isoformat()
+    cert_pem_bytes = serialize_certificate(inter_cert)
+    cert_pem_text = cert_pem_bytes.decode("utf-8")
+
     try:
-        root_ski_ext = root_cert.extensions.get_extension_for_oid(
-            x509.oid.ExtensionOID.SUBJECT_KEY_IDENTIFIER
+        cert_db.insert_certificate(
+            serial_hex=serial_hex,
+            subject=subject_dn,
+            issuer=issuer_dn,
+            not_before=not_before,
+            not_after=not_after,
+            cert_pem=cert_pem_text,
+            status="valid",
         )
-        root_ski = root_ski_ext.value.digest
-    except x509.ExtensionNotFound:
-        root_ski = compute_ski(root_cert.public_key())
+    except Exception as exc:
+        logger.error("DB insertion failed for intermediate cert serial=%s: %s", serial_hex, exc)
+        cert_db.close()
+        raise
+    cert_db.close()
 
-    # Set validity
-    not_valid_before = datetime.now(timezone.utc)
-    not_valid_after = not_valid_before + timedelta(days=validity_days)
+    key_pem = serialize_private_key(inter_key, passphrase)
+    key_path = os.path.join(out_dir, "private", "intermediate.key.pem")
+    save_private_key(key_pem, key_path)
+    logger.info("Intermediate CA private key saved to %s", os.path.abspath(key_path))
 
-    # Determine signature algorithm
-    from cryptography.hazmat.primitives.asymmetric import rsa, ec
-    if isinstance(root_key, rsa.RSAPrivateKey):
-        signature_algorithm = hashes.SHA256()
-    elif isinstance(root_key, ec.EllipticCurvePrivateKey):
-        signature_algorithm = hashes.SHA384()
-    else:
-        raise ValueError("Unsupported Root CA key type")
-
-    # Build certificate
-    builder = x509.CertificateBuilder()
-    builder = builder.subject_name(intermediate_subject)
-    builder = builder.issuer_name(root_cert.subject)
-    builder = builder.public_key(intermediate_public_key)
-    builder = builder.serial_number(serial_number)
-    builder = builder.not_valid_before(not_valid_before)
-    builder = builder.not_valid_after(not_valid_after)
-
-    # Add extensions
-    builder = builder.add_extension(
-        x509.BasicConstraints(ca=True, path_length=path_length),
-        critical=True
+    cert_pem = cert_pem_bytes
+    cert_path = os.path.join(out_dir, "certs", "intermediate.cert.pem")
+    save_certificate(cert_pem, cert_path)
+    logger.info(
+        "Intermediate CA certificate saved to %s", os.path.abspath(cert_path)
     )
 
-    builder = builder.add_extension(
-        x509.KeyUsage(
-            digital_signature=True,
-            key_encipherment=False,
-            content_commitment=False,
-            data_encipherment=False,
-            key_agreement=False,
-            key_cert_sign=True,
-            crl_sign=True,
-            encipher_only=False,
-            decipher_only=False
-        ),
-        critical=True
+    _append_intermediate_policy(
+        inter_cert, root_cert, key_type, key_size, path_length,
+        os.path.join(out_dir, "policy.txt"),
+    )
+    logger.info("Policy document updated with Intermediate CA info.")
+
+    from .audit import AuditLogger
+    audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+    audit_logger.log("issue_intermediate_ca", {
+        "subject": subject_str,
+        "serial": format(inter_cert.serial_number, "X")
+    })
+
+    from .transparency import TransparencyLog
+    ct_log = TransparencyLog(os.path.join(out_dir, "ct.log"))
+    ct_log.append_cert(inter_cert)
+
+    logger.info("Intermediate CA issuance completed successfully.")
+
+
+def _append_intermediate_policy(
+        inter_cert,
+        root_cert,
+        key_type: str,
+        key_size: int,
+        path_length: int,
+        policy_path: str,
+) -> None:
+    """Append Intermediate CA information to the policy document."""
+    subject = inter_cert.subject.rfc4514_string()
+    serial_hex = format(inter_cert.serial_number, "X")
+    not_before = inter_cert.not_valid_before_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    not_after = inter_cert.not_valid_after_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    issuer = root_cert.subject.rfc4514_string()
+    algo_label = f"{key_type.upper()}-{key_size}"
+
+    section = (
+        "\n"
+        "========================================\n"
+        "  Intermediate CA\n"
+        "========================================\n"
+        "\n"
+        f"Subject DN: {subject}\n"
+        f"Certificate Serial Number: {serial_hex}\n"
+        f"Validity Period:\n"
+        f"  Not Before: {not_before}\n"
+        f"  Not After:  {not_after}\n"
+        f"Key Algorithm and Size: {algo_label}\n"
+        f"Path Length Constraint: {path_length}\n"
+        f"Issuer (Root CA) DN: {issuer}\n"
     )
 
-    builder = builder.add_extension(
-        x509.SubjectKeyIdentifier(intermediate_ski),
-        critical=False
-    )
-
-    builder = builder.add_extension(
-        x509.AuthorityKeyIdentifier(
-            key_identifier=root_ski,
-            authority_cert_issuer=None,
-            authority_cert_serial_number=None
-        ),
-        critical=False
-    )
-
-    # Sign certificate
-    intermediate_cert = builder.sign(
-        private_key=root_key,
-        algorithm=signature_algorithm,
-        backend=default_backend()
-    )
-
-    logger.info("Intermediate CA certificate signed successfully")
-
-    # Save intermediate certificate
-    cert_path = out_path / 'certs' / 'intermediate.cert.pem'
-    cert_path.parent.mkdir(parents=True, exist_ok=True)
-
-    cert_pem = intermediate_cert.public_bytes(serialization.Encoding.PEM)
-    with open(cert_path, 'wb') as f:
-        f.write(cert_pem)
-    logger.info("Intermediate CA certificate saved to %s", cert_path)
-
-    # Save intermediate private key (encrypted)
-    key_path = out_path / 'private' / 'intermediate.key.pem'
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-
-    from micropki.crypto_utils import save_encrypted_private_key
-    save_encrypted_private_key(intermediate_key, str(key_path), passphrase)
-    logger.info("Intermediate CA private key saved to %s", key_path)
-
-    # Update policy document
-    _update_policy_intermediate(out_path / 'policy.txt', intermediate_cert, path_length)
-    logger.info("Policy document updated")
-
-    logger.info("Intermediate CA creation completed successfully")
-
-    return {
-        'cert': str(cert_path),
-        'key': str(key_path),
-        'csr': str(csr_path)
-    }
+    with open(policy_path, "a", encoding="utf-8") as f:
+        f.write(section)
 
 
-def _update_policy_intermediate(policy_path, cert, path_length):
-    """Append Intermediate CA information to policy document."""
-    from micropki.certificates import get_certificate_info
-
-    cert_info = get_certificate_info(cert)
-
-    update = f"""
-
-Intermediate CA Information
-===========================
-Added: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
-
-Subject: {cert_info['subject']}
-Issuer: {cert_info['issuer']}
-Serial Number: {cert_info['serial_number']}
-Key Algorithm: {cert_info['key_algorithm']}
-Signature Algorithm: {cert_info['signature_algorithm']}
-Path Length Constraint: {path_length}
-
-Validity Period:
-  Not Before: {cert_info['not_before']}
-  Not After: {cert_info['not_after']}
-
-Purpose:
-  This Intermediate CA is authorized to issue end-entity certificates
-  (server, client, code signing) on behalf of the Root CA.
-"""
-
-    with open(policy_path, 'a', encoding='utf-8') as f:
-        f.write(update)
+def _safe_filename(subject_str: str) -> str:
+    """Derive a safe filename from the CN of a subject DN."""
+    dn = parse_subject_dn(subject_str)
+    cn = dn.get("CN", "certificate")
+    safe = re.sub(r"[^\w.\-]", "_", cn).strip("_")
+    return safe if safe else "certificate"
 
 
-def issue_certificate(ca_cert_path, ca_key_path, ca_passphrase,
-                      template_name, subject, san_list,
-                      out_dir, validity_days, logger,
-                      csr_path=None):
+def issue_certificate(
+        ca_cert_path: str,
+        ca_key_path: str,
+        ca_passphrase: bytes,
+        template_name: str,
+        subject_str: str,
+        san_strings: list[str],
+        out_dir: str,
+        validity_days: int,
+        logger: logging.Logger,
+        csr_path: str | None = None,
+        serial_generator=None,
+) -> None:
+    """Issue an end-entity certificate signed by the given CA.
+
+    If *csr_path* is provided, the public key is extracted from the CSR
+    and no new key pair is generated (PKI-12).
     """
-    Issue an end-entity certificate from Intermediate CA.
+    from .csr import load_csr, verify_csr
 
-    Args:
-        ca_cert_path: Path to CA certificate
-        ca_key_path: Path to CA private key
-        ca_passphrase: CA key passphrase
-        template_name: Certificate template (server/client/code_signing)
-        subject: Certificate subject DN
-        san_list: List of SAN strings (type:value)
-        out_dir: Output directory
-        validity_days: Certificate validity in days
-        logger: Logger instance
-        csr_path: Optional path to CSR file
-
-    Returns:
-        dict: Paths to created files
-    """
-    from pathlib import Path
-    from cryptography.hazmat.primitives import serialization
-    from micropki.templates import get_template, parse_san_entry, build_san_extension
-    from micropki.certificates import parse_subject_dn, generate_serial_number, compute_ski
-    from datetime import timedelta
-
-    logger.info("Starting certificate issuance")
-    logger.info("Template: %s", template_name)
-    logger.info("Subject: %s", subject)
-    logger.info("SAN entries: %s", san_list)
-
-    # Get template
     template = get_template(template_name)
-    logger.info("Using template: %s", template.name)
 
-    # Parse SAN entries
-    san_entries = []
-    if san_list:
-        for san_str in san_list:
-            san_entry = parse_san_entry(san_str)
-            san_entries.append(san_entry)
-        logger.info("Parsed %d SAN entries", len(san_entries))
+    parsed_san = parse_san_strings(san_strings) if san_strings else ParsedSAN()
+    san_errors = validate_san_for_template(template, parsed_san)
+    if san_errors:
+        for err in san_errors:
+            logger.error(err)
+        raise ValueError("; ".join(san_errors))
 
-    # Validate SAN for template
-    if san_entries:
-        template.validate_san(san_entries)
-        logger.info("SAN entries validated for template '%s'", template_name)
-    elif template_name == 'server':
-        raise ValueError("Server certificate requires at least one SAN entry")
+    ca_cert = load_certificate(ca_cert_path)
+    with open(ca_key_path, "rb") as f:
+        ca_key = load_private_key(f.read(), ca_passphrase)
 
-    # Load CA certificate and key
-    logger.info("Loading CA certificate from %s", ca_cert_path)
-    ca_cert = load_certificate_pem(ca_cert_path)
+    ee_key = None
 
-    logger.info("Loading CA private key")
-    with open(ca_key_path, 'rb') as f:
-        ca_key_pem = f.read()
-
-    ca_key = serialization.load_pem_private_key(
-        ca_key_pem,
-        password=ca_passphrase,
-        backend=default_backend()
-    )
-    logger.info("CA private key loaded successfully")
-
-    # Determine key type from CA
-    from cryptography.hazmat.primitives.asymmetric import rsa, ec
-    if isinstance(ca_key, rsa.RSAPrivateKey):
-        key_type_str = "rsa"
-    elif isinstance(ca_key, ec.EllipticCurvePrivateKey):
-        key_type_str = "ecc"
-    else:
-        key_type_str = "unknown"
-
-    # Generate or load end-entity key pair
-    if csr_path:
-        logger.info("Loading CSR from %s", csr_path)
-        from micropki.csr import load_csr, verify_csr
+    if csr_path is not None:
+        logger.info("Loading external CSR from %s...", csr_path)
         csr = load_csr(csr_path)
-        verify_csr(csr)
-        end_entity_public_key = csr.public_key()
-        end_entity_key = None  # No private key when using CSR
-        logger.info("CSR loaded and verified")
+        if not verify_csr(csr):
+            raise ValueError("CSR signature verification failed")
+        logger.info("CSR signature verified successfully.")
+
+        csr_bc = None
+        for ext in csr.extensions:
+            if isinstance(ext.value, x509.BasicConstraints):
+                csr_bc = ext.value
+                break
+        if csr_bc is not None and csr_bc.ca:
+            raise ValueError(
+                "CSR requests CA=TRUE but end-entity certificates must have CA=FALSE"
+            )
+
+        public_key = csr.public_key()
+        logger.info("Using public key from CSR (no new key pair generated).")
     else:
-        logger.info("Generating new key pair for end-entity")
-        # Use RSA-2048 for end-entity by default
-        from micropki.crypto_utils import generate_rsa_key
-        end_entity_key = generate_rsa_key(2048)
-        end_entity_public_key = end_entity_key.public_key()
-        logger.info("End-entity key pair generated (RSA-2048)")
+        key_type = "rsa"
+        key_size = 2048
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
+        if isinstance(ca_key, _ec.EllipticCurvePrivateKey):
+            key_type = "ecc"
+            key_size = 256
 
-    # Parse subject
-    cert_subject = parse_subject_dn(subject)
-
-    # Generate serial number
-    serial_number = generate_serial_number()
-
-    # Compute SKI
-    cert_ski = compute_ski(end_entity_public_key)
-
-    # Get CA SKI for AKI
-    try:
-        ca_ski_ext = ca_cert.extensions.get_extension_for_oid(
-            x509.oid.ExtensionOID.SUBJECT_KEY_IDENTIFIER
+        logger.info(
+            "Generating end-entity key pair (%s, %d bits)...",
+            key_type.upper(),
+            key_size,
         )
-        ca_ski = ca_ski_ext.value.digest
-    except x509.ExtensionNotFound:
-        ca_ski = compute_ski(ca_cert.public_key())
+        ee_key = generate_key(key_type, key_size)
+        public_key = ee_key.public_key()
+        logger.info("End-entity key generation completed.")
 
-    # Set validity
-    not_valid_before = datetime.now(timezone.utc)
-    not_valid_after = not_valid_before + timedelta(days=validity_days)
+    dn = parse_subject_dn(subject_str)
+    subject_name = build_x509_name(dn)
 
-    # Determine signature algorithm
-    if isinstance(ca_key, rsa.RSAPrivateKey):
-        signature_algorithm = hashes.SHA256()
-    elif isinstance(ca_key, ec.EllipticCurvePrivateKey):
-        signature_algorithm = hashes.SHA384()
+    from .policy import verify_key_policy, verify_validity_policy
+    verify_key_policy(public_key)
+    verify_validity_policy(validity_days)
+
+    logger.info(
+        "Issuing %s certificate for subject: %s",
+        template_name,
+        subject_str,
+    )
+    serial_number = serial_generator.generate() if serial_generator is not None else None
+    cert = sign_end_entity_certificate(
+        public_key=public_key,
+        subject_name=subject_name,
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        template=template,
+        parsed_san=parsed_san,
+        validity_days=validity_days,
+        serial_number=serial_number,
+    )
+
+    san_desc = ", ".join(san_strings) if san_strings else "none"
+    logger.info(
+        "Certificate issued. Serial: %s, Template: %s, Subject: %s, SANs: %s",
+        format(cert.serial_number, "X"),
+        template_name,
+        subject_str,
+        san_desc,
+    )
+
+    # Sprint 3: store issued certificate in DB before writing any files.
+    from .database import CertificateDatabase
+
+    cert_db = CertificateDatabase(_derive_db_path(out_dir))
+    cert_db.connect()
+    cert_db.init_schema()
+
+    serial_hex = format(cert.serial_number, "X")
+    subject_dn = cert.subject.rfc4514_string()
+    issuer_dn = cert.issuer.rfc4514_string()
+    not_before = cert.not_valid_before_utc.isoformat()
+    not_after = cert.not_valid_after_utc.isoformat()
+
+    cert_pem_bytes = serialize_certificate(cert)
+    cert_pem_text = cert_pem_bytes.decode("utf-8")
+
+    try:
+        cert_db.insert_certificate(
+            serial_hex=serial_hex,
+            subject=subject_dn,
+            issuer=issuer_dn,
+            not_before=not_before,
+            not_after=not_after,
+            cert_pem=cert_pem_text,
+            status="valid",
+        )
+    except Exception as exc:
+        logger.error("DB insertion failed for cert serial=%s: %s", serial_hex, exc)
+        cert_db.close()
+        raise
+    cert_db.close()
+
+    base_name = _safe_filename(subject_str)
+    os.makedirs(out_dir, exist_ok=True)
+
+    cert_path = os.path.join(out_dir, f"{base_name}.cert.pem")
+    save_certificate(cert_pem_bytes, cert_path)
+    logger.info("Certificate saved to %s", os.path.abspath(cert_path))
+
+    if ee_key is not None:
+        key_pem = serialize_private_key_unencrypted(ee_key)
+        key_path = os.path.join(out_dir, f"{base_name}.key.pem")
+        save_private_key(key_pem, key_path)
+        logger.warning(
+            "WARNING: End-entity private key saved UNENCRYPTED to %s",
+            os.path.abspath(key_path),
+        )
     else:
-        raise ValueError("Unsupported CA key type")
+        logger.info("No private key stored (public key from external CSR).")
 
-    # Build certificate
-    builder = x509.CertificateBuilder()
-    builder = builder.subject_name(cert_subject)
-    builder = builder.issuer_name(ca_cert.subject)
-    builder = builder.public_key(end_entity_public_key)
-    builder = builder.serial_number(serial_number)
-    builder = builder.not_valid_before(not_valid_before)
-    builder = builder.not_valid_after(not_valid_after)
+    from .audit import AuditLogger
+    audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+    audit_logger.log("issue_certificate", {
+        "serial": format(cert.serial_number, "X"),
+        "subject": subject_str,
+        "template": template_name
+    })
 
-    # Add extensions from template
-    builder = builder.add_extension(
-        template.get_basic_constraints(),
-        critical=True
-    )
+    from .transparency import TransparencyLog
+    ct_log = TransparencyLog(os.path.join(out_dir, "ct.log"))
+    ct_log.append_cert(cert)
 
-    builder = builder.add_extension(
-        template.get_key_usage(key_type_str),
-        critical=True
-    )
+    logger.info("End-entity certificate issuance completed successfully.")
 
+
+def issue_ocsp_certificate(
+        ca_cert_path: str,
+        ca_key_path: str,
+        ca_passphrase: bytes,
+        subject_str: str,
+        key_type: str,
+        key_size: int,
+        out_dir: str,
+        validity_days: int,
+        logger: logging.Logger,
+        san_strings: list[str] | None = None,
+        serial_generator=None,
+) -> None:
+    """Issue a special-purpose OCSP signing certificate.
+
+    The certificate profile (OSC-1):
+      - BasicConstraints: CA=FALSE, critical
+      - KeyUsage: digitalSignature only, critical
+      - ExtendedKeyUsage: id-kp-OCSPSigning (1.3.6.1.5.5.7.3.9)
+      - Private key stored UNENCRYPTED (for automated responder startup)
+
+    Args:
+        ca_cert_path: Path to the issuing CA certificate.
+        ca_key_path: Path to the issuing CA private key.
+        ca_passphrase: Passphrase for the CA key.
+        subject_str: Distinguished Name for the OCSP responder cert.
+        key_type: 'rsa' or 'ecc'.
+        key_size: Key size (RSA >= 2048, ECC >= 256).
+        out_dir: Output directory for cert and key.
+        validity_days: Validity period in days.
+        logger: Logger instance.
+        san_strings: Optional SAN entries.
+        serial_generator: Optional serial number generator.
+    """
     from cryptography.x509.oid import ExtendedKeyUsageOID
-    eku_oids = template.get_extended_key_usage()
-    builder = builder.add_extension(
-        x509.ExtendedKeyUsage(eku_oids),
-        critical=False
+
+    ca_cert = load_certificate(ca_cert_path)
+    with open(ca_key_path, "rb") as f:
+        ca_key = load_private_key(f.read(), ca_passphrase)
+
+    # Generate OCSP signer key pair
+    logger.info(
+        "Generating OCSP responder key pair (%s, %d bits)...",
+        key_type.upper(), key_size,
+    )
+    ocsp_key = generate_key(key_type, key_size)
+    logger.info("OCSP responder key generation completed.")
+
+    # Build subject name
+    dn = parse_subject_dn(subject_str)
+    subject_name = build_x509_name(dn)
+    public_key = ocsp_key.public_key()
+
+    # Certificate extensions
+    now = datetime.datetime.now(datetime.timezone.utc)
+    not_after = now + datetime.timedelta(days=validity_days)
+
+    serial_number = serial_generator.generate() if serial_generator is not None else None
+    if serial_number is None:
+        from cryptography import x509 as x509mod
+        serial_number = x509mod.random_serial_number()
+
+    from cryptography import x509 as x509mod
+    from cryptography.hazmat.primitives import hashes
+
+    ski = x509mod.SubjectKeyIdentifier.from_public_key(public_key)
+    ca_ski = ca_cert.extensions.get_extension_for_class(
+        x509mod.SubjectKeyIdentifier
     )
 
-    if san_entries:
-        san_extension = build_san_extension(san_entries)
-        builder = builder.add_extension(san_extension, critical=False)
-        logger.info("Added SAN extension with %d entries", len(san_entries))
+    # Pick hash for signing
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa, ec as _ec
+    if isinstance(ca_key, _rsa.RSAPrivateKey):
+        sign_hash = hashes.SHA256()
+    elif isinstance(ca_key, _ec.EllipticCurvePrivateKey):
+        sign_hash = hashes.SHA384()
+    else:
+        sign_hash = hashes.SHA256()
 
-    builder = builder.add_extension(
-        x509.SubjectKeyIdentifier(cert_ski),
-        critical=False
-    )
-
-    builder = builder.add_extension(
-        x509.AuthorityKeyIdentifier(
-            key_identifier=ca_ski,
-            authority_cert_issuer=None,
-            authority_cert_serial_number=None
-        ),
-        critical=False
-    )
-
-    # Sign certificate
-    logger.info("Signing certificate...")
-    end_entity_cert = builder.sign(
-        private_key=ca_key,
-        algorithm=signature_algorithm,
-        backend=default_backend()
-    )
-    logger.info("Certificate signed successfully")
-
-    # Determine output filename from CN
-    try:
-        cn = cert_subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0].value
-        # Sanitize filename
-        safe_cn = cn.replace(' ', '_').replace('/', '_').replace('\\', '_')
-        cert_filename = f"{safe_cn}.cert.pem"
-        key_filename = f"{safe_cn}.key.pem"
-    except (IndexError, AttributeError):
-        # Fallback to serial number
-        cert_filename = f"{serial_number:x}.cert.pem"
-        key_filename = f"{serial_number:x}.key.pem"
-
-    # Save certificate
-    out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    cert_path = out_path / cert_filename
-    cert_pem = end_entity_cert.public_bytes(serialization.Encoding.PEM)
-    with open(cert_path, 'wb') as f:
-        f.write(cert_pem)
-    logger.info("Certificate saved to %s", cert_path)
-
-    # Save private key (unencrypted) if we generated it
-    key_path = None
-    if end_entity_key:
-        key_path = out_path / key_filename
-        key_pem = end_entity_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption()
+    builder = (
+        x509mod.CertificateBuilder()
+        .subject_name(subject_name)
+        .issuer_name(ca_cert.subject)
+        .public_key(public_key)
+        .serial_number(serial_number)
+        .not_valid_before(now)
+        .not_valid_after(not_after)
+        # OSC-1: CA=FALSE, critical
+        .add_extension(
+            x509mod.BasicConstraints(ca=False, path_length=None),
+            critical=True,
         )
-        with open(key_path, 'wb') as f:
-            f.write(key_pem)
+        # OSC-1: KeyUsage = digitalSignature only, critical
+        .add_extension(
+            x509mod.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        # OSC-1: ExtendedKeyUsage = id-kp-OCSPSigning
+        .add_extension(
+            x509mod.ExtendedKeyUsage([
+                x509mod.ObjectIdentifier("1.3.6.1.5.5.7.3.9"),  # id-kp-OCSPSigning
+            ]),
+            critical=False,
+        )
+        .add_extension(ski, critical=False)
+        .add_extension(
+            x509mod.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                ca_ski.value
+            ),
+            critical=False,
+        )
+    )
 
-        # Set permissions
-        import os
-        try:
-            os.chmod(key_path, 0o600)
-            logger.warning("Private key saved UNENCRYPTED to %s (permissions: 0600)", key_path)
-        except Exception as e:
-            logger.warning("Could not set file permissions: %s", e)
+    # Add SAN if provided
+    if san_strings:
+        parsed_san = parse_san_strings(san_strings)
+        from .templates import build_san_extension
+        san_ext = build_san_extension(parsed_san)
+        if san_ext is not None:
+            builder = builder.add_extension(san_ext, critical=False)
 
-    logger.info("Certificate issuance completed successfully")
-    logger.info("  Serial: %x", serial_number)
-    logger.info("  Subject: %s", cert_subject.rfc4514_string())
-    logger.info("  Template: %s", template_name)
+    cert = builder.sign(ca_key, sign_hash)
 
-    return {
-        'cert': str(cert_path),
-        'key': str(key_path) if key_path else None,
-        'serial': format(serial_number, 'x')
-    }
+    logger.info(
+        "OCSP responder certificate issued. Serial: %s, Subject: %s",
+        format(cert.serial_number, "X"), subject_str,
+    )
+
+    # Store in DB
+    from .database import CertificateDatabase
+
+    cert_db = CertificateDatabase(_derive_db_path(out_dir))
+    cert_db.connect()
+    cert_db.init_schema()
+
+    serial_hex = format(cert.serial_number, "X")
+    subject_dn = cert.subject.rfc4514_string()
+    issuer_dn = cert.issuer.rfc4514_string()
+    not_before_str = cert.not_valid_before_utc.isoformat()
+    not_after_str = cert.not_valid_after_utc.isoformat()
+    cert_pem_bytes = serialize_certificate(cert)
+    cert_pem_text = cert_pem_bytes.decode("utf-8")
+
+    try:
+        cert_db.insert_certificate(
+            serial_hex=serial_hex,
+            subject=subject_dn,
+            issuer=issuer_dn,
+            not_before=not_before_str,
+            not_after=not_after_str,
+            cert_pem=cert_pem_text,
+            status="valid",
+        )
+    except Exception as exc:
+        logger.error("DB insertion failed for OCSP cert serial=%s: %s", serial_hex, exc)
+        cert_db.close()
+        raise
+    cert_db.close()
+
+    # Save cert
+    base_name = _safe_filename(subject_str)
+    os.makedirs(out_dir, exist_ok=True)
+
+    cert_path = os.path.join(out_dir, f"{base_name}.cert.pem")
+    save_certificate(cert_pem_bytes, cert_path)
+    logger.info("OCSP responder certificate saved to %s", os.path.abspath(cert_path))
+
+    # OSC-3: Save private key UNENCRYPTED (for automated startup)
+    key_pem = serialize_private_key_unencrypted(ocsp_key)
+    key_path = os.path.join(out_dir, f"{base_name}.key.pem")
+    save_private_key(key_pem, key_path)
+    logger.warning(
+        "WARNING: OCSP responder private key saved UNENCRYPTED to %s. "
+        "This is required for automated OCSP responder startup.",
+        os.path.abspath(key_path),
+    )
+
+    logger.info("OCSP responder certificate issuance completed successfully.")

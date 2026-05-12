@@ -1,3 +1,5 @@
+
+
 import logging
 import os
 import sys
@@ -8,12 +10,21 @@ DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 
 class _MillisecondFormatter(logging.Formatter):
+    """Formatter that outputs ISO 8601 timestamps with milliseconds."""
 
     default_msec_format = "%s.%03d"
 
 
 def setup_logging(log_file: str | None = None, level: int = logging.INFO) -> logging.Logger:
+    """Configure and return the application logger.
 
+    Args:
+        log_file: Path to a log file.  If *None*, logs go to stderr.
+        level: Logging level.
+
+    Returns:
+        Configured :class:`logging.Logger`.
+    """
     logger = logging.getLogger("micropki")
     logger.setLevel(level)
     logger.handlers.clear()

@@ -1,13 +1,4 @@
-"""CLI argument parser for MicroPKI.
 
-Provides the ``micropki`` entry point with subcommands:
-- ``ca init``              — create a self-signed Root CA
-- ``ca issue-intermediate`` — create an Intermediate CA signed by Root
-- ``ca issue-cert``         — issue an end-entity certificate
-- ``ca validate-chain``     — validate a certificate chain
-- ``ca issue-ocsp-cert``   — issue an OCSP responder certificate (Sprint 5)
-- ``ocsp serve``           — start the OCSP responder (Sprint 5)
-"""
 
 from __future__ import annotations
 
@@ -21,8 +12,6 @@ from .repository import RepositoryServer, RepositoryHandler
 from .serial import SerialNumberGenerator
 from .config import Config
 from .config import Config
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="micropki",
@@ -39,8 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_sub = db_parser.add_subparsers(dest="db_action", help="DB actions")
 
     db_init_parser = db_sub.add_parser("init", help="Initialize the certificate database")
-    db_init_parser.add_argument("--db-path", default="./pki/micropki.db",
-                                help="Path to the SQLite database file (default: ./pki/micropki.db)")
+    db_init_parser.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database file (default: ./pki/micropki.db)")
     db_init_parser.add_argument("--log-file", default=None, help="Path to a log file. If omitted, logs go to stderr")
 
     # --- repo commands ---
@@ -48,13 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     repo_sub = repo_parser.add_subparsers(dest="repo_action", help="Repository actions")
 
     repo_serve_parser = repo_sub.add_parser("serve", help="Start the HTTP repository server")
-    repo_serve_parser.add_argument("--host", default="127.0.0.1",
-                                   help="Bind address for the server (default: 127.0.0.1)")
+    repo_serve_parser.add_argument("--host", default="127.0.0.1", help="Bind address for the server (default: 127.0.0.1)")
     repo_serve_parser.add_argument("--port", type=int, default=8080, help="TCP port for the server (default: 8080)")
-    repo_serve_parser.add_argument("--db-path", default="./pki/micropki.db",
-                                   help="Path to the SQLite database (default: ./pki/micropki.db)")
-    repo_serve_parser.add_argument("--cert-dir", default="./pki/certs",
-                                   help="Directory containing PEM certificates (default: ./pki/certs)")
+    repo_serve_parser.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database (default: ./pki/micropki.db)")
+    repo_serve_parser.add_argument("--cert-dir", default="./pki/certs", help="Directory containing PEM certificates (default: ./pki/certs)")
     repo_serve_parser.add_argument("--rate-limit", type=float, default=100.0, help="Rate limit in tokens per second")
     repo_serve_parser.add_argument("--rate-burst", type=int, default=50, help="Maximum burst size for rate limiter")
     repo_serve_parser.add_argument("--log-file", default=None, help="Path to a log file. If omitted, logs go to stderr")
@@ -129,10 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Certificate template: server, client, or code_signing",
     )
     cert_parser.add_argument("--subject", required=True, help="Certificate Distinguished Name")
-    cert_parser.add_argument("--san", action="append", default=[],
-                             help="SAN entry (e.g., dns:example.com). Repeatable.")
-    cert_parser.add_argument("--csr", default=None,
-                             help="Path to an externally generated CSR (PEM). If provided, no new key pair is generated.")
+    cert_parser.add_argument("--san", action="append", default=[], help="SAN entry (e.g., dns:example.com). Repeatable.")
+    cert_parser.add_argument("--csr", default=None, help="Path to an externally generated CSR (PEM). If provided, no new key pair is generated.")
     cert_parser.add_argument("--out-dir", default="./pki/certs", help="Output directory (default: ./pki/certs)")
     cert_parser.add_argument("--validity-days", type=int, default=365, help="Validity period in days (default: 365)")
     cert_parser.add_argument("--log-file", default=None, help="Log file path")
@@ -213,14 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
     ocsp_cert_parser.add_argument("--ca-key", required=True, help="Issuing CA encrypted private key (PEM)")
     ocsp_cert_parser.add_argument("--ca-pass-file", required=True, help="File with CA key passphrase")
     ocsp_cert_parser.add_argument("--subject", required=True, help="OCSP Responder Distinguished Name")
-    ocsp_cert_parser.add_argument("--key-type", choices=["rsa", "ecc"], default="rsa",
-                                  help="Key algorithm (default: rsa)")
+    ocsp_cert_parser.add_argument("--key-type", choices=["rsa", "ecc"], default="rsa", help="Key algorithm (default: rsa)")
     ocsp_cert_parser.add_argument("--key-size", type=int, default=2048, help="Key size (default: 2048)")
-    ocsp_cert_parser.add_argument("--san", action="append", default=[],
-                                  help="SAN entry (e.g., dns:ocsp.example.com). Repeatable.")
+    ocsp_cert_parser.add_argument("--san", action="append", default=[], help="SAN entry (e.g., dns:ocsp.example.com). Repeatable.")
     ocsp_cert_parser.add_argument("--out-dir", default="./pki/certs", help="Output directory (default: ./pki/certs)")
-    ocsp_cert_parser.add_argument("--validity-days", type=int, default=365,
-                                  help="Validity period in days (default: 365)")
+    ocsp_cert_parser.add_argument("--validity-days", type=int, default=365, help="Validity period in days (default: 365)")
     ocsp_cert_parser.add_argument("--log-file", default=None, help="Log file path")
 
     # --- ocsp commands (Sprint 5) ---
@@ -230,13 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
     ocsp_serve_parser = ocsp_sub.add_parser("serve", help="Start the OCSP responder")
     ocsp_serve_parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     ocsp_serve_parser.add_argument("--port", type=int, default=8081, help="TCP port (default: 8081)")
-    ocsp_serve_parser.add_argument("--db-path", default="./pki/micropki.db",
-                                   help="SQLite database path (default: ./pki/micropki.db)")
+    ocsp_serve_parser.add_argument("--db-path", default="./pki/micropki.db", help="SQLite database path (default: ./pki/micropki.db)")
     ocsp_serve_parser.add_argument("--responder-cert", required=True, help="OCSP signing certificate (PEM)")
     ocsp_serve_parser.add_argument("--responder-key", required=True, help="OCSP signing private key (PEM, unencrypted)")
     ocsp_serve_parser.add_argument("--ca-cert", required=True, help="Issuer CA certificate (PEM)")
-    ocsp_serve_parser.add_argument("--cache-ttl", type=int, default=60,
-                                   help="Response cache TTL in seconds (default: 60)")
+    ocsp_serve_parser.add_argument("--cache-ttl", type=int, default=60, help="Response cache TTL in seconds (default: 60)")
     ocsp_serve_parser.add_argument("--rate-limit", type=float, default=100.0, help="Rate limit in tokens per second")
     ocsp_serve_parser.add_argument("--rate-burst", type=int, default=50, help="Maximum burst size for rate limiter")
     ocsp_serve_parser.add_argument("--log-file", default=None, help="Log file path (default: stderr)")
@@ -893,7 +871,7 @@ def _handle_ca_check_revoked(args: argparse.Namespace) -> int:
             reason = record.get("revocation_reason", "unspecified")
             date = record.get("revocation_date", "unknown")
             print(f"Certificate {args.serial} is REVOKED since {date} (Reason: {reason})")
-            return 2  # special exit code for revoked
+            return 2 # special exit code for revoked
         else:
             print(f"Certificate {args.serial} is {status.upper()}")
             return 0
