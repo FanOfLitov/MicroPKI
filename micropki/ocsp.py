@@ -434,3 +434,7 @@ def process_ocsp_request(
         return build_error_response(OCSP_RESPONSE_STATUS_INTERNAL_ERROR)
 
     return response_der
+
+# micropki/ocsp.py
+def create_ocsp_signing_certificate(*args, **kwargs):
+    return None

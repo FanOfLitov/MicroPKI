@@ -96,3 +96,10 @@ def verify_audit_log(log_file: str) -> bool:
         return False
 
     return True
+
+class SerialGenerator:
+    def __init__(self, start=1): self.current = start
+    def generate(self):
+        value = self.current
+        self.current += 1
+        return value

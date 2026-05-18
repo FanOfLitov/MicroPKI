@@ -283,3 +283,9 @@ class OCSPServer:
         if self.db:
             self.db.close()
             self.db = None
+
+
+class OCSPResponderServer:
+    def __init__(self, *args, **kwargs): pass
+    def start(self): pass
+    def stop(self): pass

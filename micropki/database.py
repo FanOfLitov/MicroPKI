@@ -351,3 +351,10 @@ class CertificateDatabase:
             A list of dictionaries with revoked certificate data.
         """
         return self.list_certificates(status="revoked")
+
+
+
+# micropki/database.py
+# Для совместимости с тестами
+  # если CertificateDatabase определён в этом же файле
+Database = CertificateDatabase

@@ -1,162 +1,144 @@
+"""Cryptographic utility functions — key generation, PEM I/O, DN parsing."""
+
+from __future__ import annotations
+
 import os
-from pathlib import Path
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import rsa, ec
-from cryptography.hazmat.backends import default_backend
-from cryptography import x509
+import platform
+import re
+import stat
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
+
+_ECC_CURVES: dict[int, ec.EllipticCurve] = {
+    256: ec.SECP256R1(),
+    384: ec.SECP384R1(),
+}
 
 
-def read_passphrase_file(filepath):
-    """
-    Read and sanitize passphrase from file.
-    
+def generate_key(key_type: str, key_size: int) -> PrivateKeyTypes:
+    """Generate an RSA or ECC private key.
+
     Args:
-        filepath: Path to passphrase file
-    
+        key_type: ``'rsa'`` or ``'ecc'``.
+        key_size: RSA bit length (>= 2048) or ECC curve size (256 or 384).
+
     Returns:
-        bytes: Passphrase bytes
-    
-    Raises:
-        ValueError: If passphrase is empty
-        IOError: If file cannot be read
+        A private key object.
     """
-    with open(filepath, 'rb') as f:
-        passphrase = f.read()
-    
-    # Strip trailing newline/whitespace
-    passphrase = passphrase.strip()
-    
-    if not passphrase:
-        raise ValueError("Passphrase file is empty")
-    
-    return passphrase
+    if key_type == "rsa":
+        return rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    elif key_type == "ecc":
+        curve = _ECC_CURVES.get(key_size)
+        if curve is None:
+            raise ValueError(f"Unsupported ECC curve size: {key_size}")
+        return ec.generate_private_key(curve)
+    else:
+        raise ValueError(f"Unsupported key type: {key_type}")
 
 
-def generate_rsa_key(key_size=4096):
-    """
-    Generate RSA private key.
-    
-    Args:
-        key_size: Key size in bits (must be 4096)
-    
-    Returns:
-        RSAPrivateKey instance
-    
-    Raises:
-        ValueError: If key_size is not 4096
-    """
-    if key_size != 4096:
-        raise ValueError("RSA key size must be 4096 bits")
-    
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=key_size,
-        backend=default_backend()
-    )
-    
-    return private_key
-
-
-def generate_ecc_key(key_size=384):
-    """
-    Generate ECC private key on P-384 curve.
-    
-    Args:
-        key_size: Key size in bits (must be 384 for P-384)
-    
-    Returns:
-        EllipticCurvePrivateKey instance
-    
-    Raises:
-        ValueError: If key_size is not 384
-    """
-    if key_size != 384:
-        raise ValueError("ECC key size must be 384 bits (P-384)")
-    
-    private_key = ec.generate_private_key(
-        ec.SECP384R1(),  # P-384 curve
-        backend=default_backend()
-    )
-    
-    return private_key
-
-
-def save_encrypted_private_key(private_key, filepath, passphrase):
-    """
-    Save private key encrypted with passphrase.
-    
-    Args:
-        private_key: Private key object (RSA or ECC)
-        filepath: Path where to save the encrypted key
-        passphrase: Passphrase for encryption (bytes)
-    
-    The key is encrypted using PKCS#8 format with AES-256-CBC.
-    File permissions are set to 0600 (owner read/write only).
-    """
-    # Ensure parent directory exists with secure permissions
-    parent_dir = Path(filepath).parent
-    parent_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Set directory permissions to 0700 on Unix-like systems
-    try:
-        os.chmod(parent_dir, 0o700)
-    except Exception:
-        # Windows doesn't support chmod in the same way
-        pass
-    
-    # Serialize private key with encryption
-    encrypted_pem = private_key.private_bytes(
+def serialize_private_key(key: PrivateKeyTypes, passphrase: bytes) -> bytes:
+    """Serialize a private key to encrypted PEM (PKCS#8)."""
+    return key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.BestAvailableEncryption(passphrase)
+        encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
     )
-    
-    # Write to file with secure permissions
-    with open(filepath, 'wb') as f:
-        f.write(encrypted_pem)
-    
-    # Set file permissions to 0600 on Unix-like systems
-    try:
-        os.chmod(filepath, 0o600)
-    except Exception:
-        # Windows doesn't support chmod in the same way
-        pass
 
 
-def save_certificate_pem(certificate_der, filepath):
-    """
-    Save certificate in PEM format.
-    
-    Args:
-        certificate_der: Certificate in DER format (bytes)
-        filepath: Path where to save the certificate
-    """
-    # Parse certificate from DER
-    cert = x509.load_der_x509_certificate(certificate_der, default_backend())
-    
-    # Serialize to PEM
-    pem = cert.public_bytes(serialization.Encoding.PEM)
-    
-    # Ensure parent directory exists
-    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-    
-    # Write to file
-    with open(filepath, 'wb') as f:
-        f.write(pem)
+def serialize_private_key_unencrypted(key: PrivateKeyTypes) -> bytes:
+    """Serialize a private key to unencrypted PEM (PKCS#8)."""
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
 
 
-def load_certificate_pem(filepath):
+def load_private_key(pem_data: bytes, passphrase: bytes) -> PrivateKeyTypes:
+    """Load an encrypted PEM private key."""
+    return serialization.load_pem_private_key(pem_data, password=passphrase)
+
+
+def save_private_key(pem_data: bytes, path: str) -> None:
+    """Write PEM data to *path* with restricted permissions (0o600)."""
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+
+    if platform.system() != "Windows":
+        os.chmod(parent, 0o700)
+
+    with open(path, "wb") as f:
+        f.write(pem_data)
+
+    if platform.system() != "Windows":
+        os.chmod(path, 0o600)
+
+
+def parse_subject_dn(dn_string: str) -> dict[str, str]:
+    """Parse a Distinguished Name string into a dict.
+
+    Supports slash notation (``/CN=.../O=...``) and comma-separated
+    (``CN=...,O=...``).
     """
-    Load certificate from PEM file.
-    
-    Args:
-        filepath: Path to PEM certificate file
-    
-    Returns:
-        x509.Certificate object
-    """
-    with open(filepath, 'rb') as f:
+    dn_string = dn_string.strip()
+
+    if dn_string.startswith("/"):
+        parts = dn_string.lstrip("/").split("/")
+    else:
+        parts = [p.strip() for p in dn_string.split(",")]
+
+    result: dict[str, str] = {}
+    for part in parts:
+        if "=" not in part:
+            raise ValueError(f"Invalid DN component (missing '='): '{part}'")
+        key, value = part.split("=", 1)
+        key = key.strip().upper()
+        value = value.strip()
+        if not value:
+            raise ValueError(f"Empty value for DN attribute '{key}'")
+        result[key] = value
+
+    if "CN" not in result:
+        raise ValueError("Subject DN must contain at least a CN (Common Name)")
+
+    return result
+
+
+def load_certificates_from_pem(pem_path: str):
+    """Load one or more certificates from a PEM file."""
+    import cryptography.x509 as x509
+    from cryptography.hazmat.backends import default_backend
+
+    with open(pem_path, "rb") as f:
         pem_data = f.read()
-    
-    cert = x509.load_pem_x509_certificate(pem_data, default_backend())
-    return cert
+
+    # cryptography doesn't natively parse a bundle of certs reliably, so we split by CERTIFICATE exactly
+    certs = []
+    lines = pem_data.decode("utf-8").splitlines()
+    current_cert = []
+    in_cert = False
+
+    for line in lines:
+        if "-----BEGIN CERTIFICATE-----" in line:
+            in_cert = True
+            current_cert = [line]
+        elif "-----END CERTIFICATE-----" in line and in_cert:
+            current_cert.append(line)
+            in_cert = False
+            cert_content = "\n".join(current_cert).encode("utf-8")
+            certs.append(x509.load_pem_x509_certificate(cert_content, default_backend()))
+        elif in_cert:
+            current_cert.append(line)
+
+    return certs
+
+def generate_rsa_key(key_size: int = 4096):
+    """Generate an RSA private key."""
+    return generate_key("rsa", key_size)
+
+
+def generate_ecc_key(key_size: int = 384):
+    """Generate an ECC private key."""
+    return generate_key("ecc", key_size)

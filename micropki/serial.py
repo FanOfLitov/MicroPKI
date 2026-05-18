@@ -4,7 +4,7 @@ Serial number generator module for MicroPKI.
 Implements a unique serial number generator that combines
 timestamp and CSPRNG to guarantee uniqueness across the PKI.
 """
-
+import random
 import os
 import time
 import logging
@@ -13,6 +13,8 @@ from typing import Optional
 
 # Initialize module logger
 logger = logging.getLogger(__name__)
+
+
 
 
 class SerialNumberGenerator:
@@ -118,3 +120,5 @@ class SerialNumberGenerator:
         hex_serial = format(serial, 'X')
         logger.debug("Generated serial number (hex): %s", hex_serial)
         return hex_serial
+
+SerialGenerator = SerialNumberGenerator

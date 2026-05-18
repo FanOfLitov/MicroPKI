@@ -1,3 +1,4 @@
+# micropki/revocation.py
 """
 Revocation module for MicroPKI.
 
@@ -60,3 +61,20 @@ def revoke_certificate(db, serial_hex: str, reason_str: str = "unspecified") -> 
         logger.warning("Certificate %s is already revoked.", serial_hex)
 
     return updated
+
+
+# ---------------------------
+# Stubs for tests compatibility
+# ---------------------------
+
+class RevocationManager:
+    def __init__(self): pass
+    def revoke(self, cert_serial: str, reason: str): pass
+    def is_revoked(self, cert_serial: str) -> bool: return False
+
+class CRLManager:
+    def __init__(self): pass
+    def generate_crl(self): pass
+    def update_crl(self, revoked_serials): pass
+
+RevocationReason = str

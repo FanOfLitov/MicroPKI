@@ -261,3 +261,13 @@ def sign_end_entity_certificate(
         builder = builder.add_extension(san_ext, critical=False)
 
     return builder.sign(ca_key, _pick_hash(ca_key))
+
+
+def compute_certificate_fingerprint(cert, hash_algo=None) -> str:
+    """Return certificate fingerprint as uppercase hexadecimal string."""
+    from cryptography.hazmat.primitives import hashes
+
+    if hash_algo is None:
+        hash_algo = hashes.SHA256()
+
+    return cert.fingerprint(hash_algo).hex().upper()

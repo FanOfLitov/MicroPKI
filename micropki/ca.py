@@ -46,14 +46,14 @@ def _derive_db_path(out_dir: str) -> str:
 
 
 def init_root_ca(
-        subject_str: str,
-        key_type: str,
-        key_size: int,
-        passphrase: bytes,
-        out_dir: str,
-        validity_days: int,
-        logger: logging.Logger,
-        serial_generator=None,
+    subject_str: str,
+    key_type: str,
+    key_size: int,
+    passphrase: bytes,
+    out_dir: str,
+    validity_days: int,
+    logger: logging.Logger,
+    serial_generator=None,
 ) -> None:
     """Create a self-signed Root CA: key pair, certificate, policy file.
 
@@ -106,10 +106,10 @@ def init_root_ca(
 
 
 def _write_policy(
-        cert,
-        key_type: str,
-        key_size: int,
-        path: str,
+    cert,
+    key_type: str,
+    key_size: int,
+    path: str,
 ) -> None:
     """Write a human-readable policy.txt."""
     subject = cert.subject.rfc4514_string()
@@ -145,18 +145,18 @@ def _write_policy(
 
 
 def issue_intermediate_ca(
-        root_cert_path: str,
-        root_key_path: str,
-        root_passphrase: bytes,
-        subject_str: str,
-        key_type: str,
-        key_size: int,
-        passphrase: bytes,
-        out_dir: str,
-        validity_days: int,
-        path_length: int,
-        logger: logging.Logger,
-        serial_generator=None,
+    root_cert_path: str,
+    root_key_path: str,
+    root_passphrase: bytes,
+    subject_str: str,
+    key_type: str,
+    key_size: int,
+    passphrase: bytes,
+    out_dir: str,
+    validity_days: int,
+    path_length: int,
+    logger: logging.Logger,
+    serial_generator=None,
 ) -> None:
     """Generate an Intermediate CA signed by the Root CA."""
     root_cert = load_certificate(root_cert_path)
@@ -264,12 +264,12 @@ def issue_intermediate_ca(
 
 
 def _append_intermediate_policy(
-        inter_cert,
-        root_cert,
-        key_type: str,
-        key_size: int,
-        path_length: int,
-        policy_path: str,
+    inter_cert,
+    root_cert,
+    key_type: str,
+    key_size: int,
+    path_length: int,
+    policy_path: str,
 ) -> None:
     """Append Intermediate CA information to the policy document."""
     subject = inter_cert.subject.rfc4514_string()
@@ -308,17 +308,17 @@ def _safe_filename(subject_str: str) -> str:
 
 
 def issue_certificate(
-        ca_cert_path: str,
-        ca_key_path: str,
-        ca_passphrase: bytes,
-        template_name: str,
-        subject_str: str,
-        san_strings: list[str],
-        out_dir: str,
-        validity_days: int,
-        logger: logging.Logger,
-        csr_path: str | None = None,
-        serial_generator=None,
+    ca_cert_path: str,
+    ca_key_path: str,
+    ca_passphrase: bytes,
+    template_name: str,
+    subject_str: str,
+    san_strings: list[str],
+    out_dir: str,
+    validity_days: int,
+    logger: logging.Logger,
+    csr_path: str | None = None,
+    serial_generator=None,
 ) -> None:
     """Issue an end-entity certificate signed by the given CA.
 
@@ -477,17 +477,17 @@ def issue_certificate(
 
 
 def issue_ocsp_certificate(
-        ca_cert_path: str,
-        ca_key_path: str,
-        ca_passphrase: bytes,
-        subject_str: str,
-        key_type: str,
-        key_size: int,
-        out_dir: str,
-        validity_days: int,
-        logger: logging.Logger,
-        san_strings: list[str] | None = None,
-        serial_generator=None,
+    ca_cert_path: str,
+    ca_key_path: str,
+    ca_passphrase: bytes,
+    subject_str: str,
+    key_type: str,
+    key_size: int,
+    out_dir: str,
+    validity_days: int,
+    logger: logging.Logger,
+    san_strings: list[str] | None = None,
+    serial_generator=None,
 ) -> None:
     """Issue a special-purpose OCSP signing certificate.
 
@@ -664,3 +664,30 @@ def issue_ocsp_certificate(
     )
 
     logger.info("OCSP responder certificate issuance completed successfully.")
+
+
+# micropki/ca.py
+class RootCA:
+    """Wrapper for Root CA to be compatible with tests"""
+    def __init__(self, subject_str, key_type, key_size, passphrase, out_dir, validity_days, logger=None):
+        import logging, os
+        self.logger = logger or logging.getLogger("RootCA")
+        self.out_dir = out_dir
+        self.subject_str = subject_str
+        self.key_type = key_type
+        self.key_size = key_size
+        self.passphrase = passphrase
+        self.validity_days = validity_days
+
+        # Вызываем существующую функцию init_root_ca
+        init_root_ca(
+            subject_str=subject_str,
+            key_type=key_type,
+            key_size=key_size,
+            passphrase=passphrase,
+            out_dir=out_dir,
+            validity_days=validity_days,
+            logger=self.logger,
+        )
+        self.key_path = os.path.join(out_dir, "private", "ca.key.pem")
+        self.cert_path = os.path.join(out_dir, "certs", "ca.cert.pem")
