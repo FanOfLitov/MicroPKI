@@ -1,0 +1,789 @@
+# КОМАНДЫ ДЛЯ ПРОВЕРКИ MicroPKI В CMD ЧЕРЕЗ py
+
+Эта версия предназначена для Windows CMD, то есть для обычной командной строки cmd.exe.
+
+Важно:
+
+* В CMD перенос строки делается символом ^
+* Символ ^ должен стоять в самом конце строки.
+* После ^ не должно быть пробелов.
+* В PowerShell эти команды с ^ работать нормально не будут.
+* В Linux вместо py используется python3, а перенос строки делается через \
+
+1. ПЕРЕЙТИ В КОРЕНЬ ПРОЕКТА
+
+---
+
+cd C:\Users\User\Documents\GitHub\MicroPKI
+
+Пояснение:
+Нужно перейти в папку проекта, где лежат папки micropki, tests, demo и файл README.md.
+
+2. АКТИВИРОВАТЬ ВИРТУАЛЬНОЕ ОКРУЖЕНИЕ В CMD
+
+---
+
+..venv\Scripts\activate.bat
+
+Пояснение:
+В CMD активируется именно activate.bat.
+Для PowerShell используется Activate.ps1, но здесь мы работаем через CMD.
+
+3. ПРОВЕРИТЬ PYTHON LAUNCHER
+
+---
+
+py --version
+
+py -3 --version
+
+Пояснение:
+Команда py запускает Python через Windows Python Launcher.
+
+4. УСТАНОВИТЬ ЗАВИСИМОСТИ
+
+---
+
+py -m pip install --upgrade pip
+
+py -m pip install cryptography requests pytest pytest-cov pyyaml
+
+Пояснение:
+Устанавливаются основные зависимости проекта.
+
+5. ПРОВЕРИТЬ ИМПОРТ ПРОЕКТА
+
+---
+
+py -c "import micropki; import micropki.ca; import micropki.cli; print('imports ok')"
+
+Ожидаемый результат:
+
+imports ok
+
+Пояснение:
+Проверяется, что Python видит пакет micropki.
+
+6. ПРОВЕРИТЬ СПРАВКУ CLI
+
+---
+
+py -m micropki --help
+
+py -m micropki ca --help
+
+py -m micropki db --help
+
+py -m micropki repo --help
+
+py -m micropki ocsp --help
+
+py -m micropki client --help
+
+py -m micropki audit --help
+
+Пояснение:
+Проверяется, что CLI запускается и показывает доступные команды.
+
+7. ЗАПУСТИТЬ ВСЕ ТЕСТЫ
+
+---
+
+py -m pytest -q
+
+Пояснение:
+Быстрый запуск всех тестов.
+
+8. ЗАПУСТИТЬ ВСЕ ТЕСТЫ ПОДРОБНО
+
+---
+
+py -m pytest -v
+
+Пояснение:
+Подробный запуск всех тестов.
+
+9. ЗАПУСТИТЬ COVERAGE
+
+---
+
+py -m pytest --cov=micropki --cov-report=term-missing
+
+Пояснение:
+Показывает покрытие кода тестами.
+
+10. ЗАПУСТИТЬ ТЕСТЫ ПО СПРИНТАМ
+
+---
+
+Спринт 1:
+
+py -m pytest -v tests\test_crypto_utils.py
+
+py -m pytest -v tests\test_certificates.py
+
+py -m pytest -v tests\test_ca.py
+
+Спринт 2:
+
+py -m pytest -v tests\test_csr.py
+
+py -m pytest -v tests\test_templates.py
+
+py -m pytest -v tests\test_intermediate.py
+
+py -m pytest -v tests\test_chain.py
+
+py -m pytest -v tests\test_cli_sprint.py
+
+Спринт 3:
+
+py -m pytest -v tests\test_db_cli.py
+
+py -m pytest -v tests\serial_uniqueness.py
+
+py -m pytest -v tests\test_repository_api.py
+
+Спринт 4:
+
+py -m pytest -v tests\test_sprint4.py
+
+Спринт 5:
+
+py -m pytest -v tests\test_sprint5.py
+
+Спринт 6:
+
+py -m pytest -v tests\test_client_logic.py
+
+Спринт 8:
+
+py -m pytest -v tests\test_performance.py
+
+Пояснение:
+Эти команды удобно использовать, если нужно показать проверку по отдельным спринтам.
+
+11. СОЗДАТЬ ПАПКУ ДЛЯ СЕКРЕТОВ
+
+---
+
+mkdir pki\secrets
+
+Пояснение:
+Создаётся папка для passphrase-файлов.
+
+12. СОЗДАТЬ PASSPHRASE ДЛЯ ROOT CA
+
+---
+
+echo RootPass123!> pki\secrets\root.pass
+
+Пояснение:
+Создаётся файл с паролем для шифрования закрытого ключа Root CA.
+
+Важно:
+В команде специально нет пробела перед >, чтобы лишний пробел не попал в пароль.
+
+13. СОЗДАТЬ ROOT CA
+
+---
+
+py -m micropki ca init ^
+--subject "CN=Demo Root CA,O=MicroPKI,C=RU" ^
+--key-type rsa ^
+--key-size 4096 ^
+--passphrase-file pki\secrets\root.pass ^
+--out-dir pki ^
+--validity-days 3650 ^
+--force
+
+Пояснение:
+Создаётся самоподписанный Root CA.
+
+После выполнения должны появиться:
+
+pki\private\ca.key.pem
+pki\certs\ca.cert.pem
+pki\policy.txt
+
+14. ПРОВЕРИТЬ ROOT CA ЧЕРЕЗ OPENSSL
+
+---
+
+openssl x509 -in pki\certs\ca.cert.pem -text -noout
+
+openssl verify -CAfile pki\certs\ca.cert.pem pki\certs\ca.cert.pem
+
+Ожидаемый результат:
+
+pki\certs\ca.cert.pem: OK
+
+Пояснение:
+Проверяется, что Root CA корректно создан.
+
+15. ИНИЦИАЛИЗИРОВАТЬ SQLITE-БАЗУ
+
+---
+
+py -m micropki db init --db-path pki\micropki.db
+
+Пояснение:
+Создаётся база данных для сертификатов.
+
+16. СОЗДАТЬ PASSPHRASE ДЛЯ INTERMEDIATE CA
+
+---
+
+echo InterPass456!> pki\secrets\intermediate.pass
+
+Пояснение:
+Создаётся файл с паролем для закрытого ключа Intermediate CA.
+
+17. СОЗДАТЬ INTERMEDIATE CA
+
+---
+
+py -m micropki ca issue-intermediate ^
+--root-cert pki\certs\ca.cert.pem ^
+--root-key pki\private\ca.key.pem ^
+--root-pass-file pki\secrets\root.pass ^
+--subject "CN=Demo Intermediate CA,O=MicroPKI" ^
+--key-type rsa ^
+--key-size 4096 ^
+--passphrase-file pki\secrets\intermediate.pass ^
+--out-dir pki ^
+--validity-days 1825 ^
+--pathlen 0
+
+Пояснение:
+Создаётся Intermediate CA, подписанный Root CA.
+
+После выполнения должны появиться:
+
+pki\private\intermediate.key.pem
+pki\certs\intermediate.cert.pem
+pki\csrs\intermediate.csr.pem
+
+18. ПРОВЕРИТЬ INTERMEDIATE CA ЧЕРЕЗ OPENSSL
+
+---
+
+openssl verify -CAfile pki\certs\ca.cert.pem pki\certs\intermediate.cert.pem
+
+Ожидаемый результат:
+
+pki\certs\intermediate.cert.pem: OK
+
+Пояснение:
+Проверяется, что Intermediate CA подписан Root CA.
+
+19. ВЫПУСТИТЬ SERVER-СЕРТИФИКАТ
+
+---
+
+py -m micropki ca issue-cert ^
+--ca-cert pki\certs\intermediate.cert.pem ^
+--ca-key pki\private\intermediate.key.pem ^
+--ca-pass-file pki\secrets\intermediate.pass ^
+--template server ^
+--subject "CN=localhost,O=MicroPKI" ^
+--san "dns:localhost" ^
+--out-dir pki\certs ^
+--validity-days 365
+
+Пояснение:
+Создаётся серверный сертификат для localhost.
+
+Для server-сертификата SAN обязателен.
+
+20. ВЫПУСТИТЬ CLIENT-СЕРТИФИКАТ
+
+---
+
+py -m micropki ca issue-cert ^
+--ca-cert pki\certs\intermediate.cert.pem ^
+--ca-key pki\private\intermediate.key.pem ^
+--ca-pass-file pki\secrets\intermediate.pass ^
+--template client ^
+--subject "CN=Demo Client,O=MicroPKI" ^
+--san "email:client@example.com" ^
+--out-dir pki\certs ^
+--validity-days 365
+
+Пояснение:
+Создаётся клиентский сертификат с назначением clientAuth.
+
+21. ВЫПУСТИТЬ CODE SIGNING-СЕРТИФИКАТ
+
+---
+
+py -m micropki ca issue-cert ^
+--ca-cert pki\certs\intermediate.cert.pem ^
+--ca-key pki\private\intermediate.key.pem ^
+--ca-pass-file pki\secrets\intermediate.pass ^
+--template code_signing ^
+--subject "CN=Demo Code Signer,O=MicroPKI" ^
+--out-dir pki\certs ^
+--validity-days 365
+
+Пояснение:
+Создаётся сертификат для подписи файлов.
+
+22. ВЫПУСТИТЬ OCSP RESPONDER CERTIFICATE
+
+---
+
+py -m micropki ca issue-ocsp-cert ^
+--ca-cert pki\certs\intermediate.cert.pem ^
+--ca-key pki\private\intermediate.key.pem ^
+--ca-pass-file pki\secrets\intermediate.pass ^
+--subject "CN=OCSP Responder,O=MicroPKI" ^
+--key-type rsa ^
+--key-size 2048 ^
+--out-dir pki\certs ^
+--validity-days 365
+
+Пояснение:
+Создаётся специальный сертификат для подписи OCSP-ответов.
+
+23. ПОКАЗАТЬ СПИСОК СЕРТИФИКАТОВ
+
+---
+
+py -m micropki ca list-certs --status valid --format table
+
+Пояснение:
+Показывает действующие сертификаты из SQLite.
+
+24. ПОКАЗАТЬ СЕРТИФИКАТ ПО SERIAL
+
+---
+
+py -m micropki ca show-cert SERIAL_HEX
+
+Пояснение:
+SERIAL_HEX нужно взять из команды list-certs.
+
+25. ПРОВЕРИТЬ ЦЕПОЧКУ СЕРТИФИКАТОВ
+
+---
+
+py -m micropki ca validate-chain ^
+--cert pki\certs\localhost.cert.pem ^
+--intermediate pki\certs\intermediate.cert.pem ^
+--root pki\certs\ca.cert.pem
+
+Ожидаемый результат:
+
+Chain validation PASSED: leaf → intermediate → root
+
+Пояснение:
+Проверяется цепочка:
+
+localhost certificate -> Intermediate CA -> Root CA
+
+26. ЗАПУСТИТЬ HTTP REPOSITORY
+
+---
+
+py -m micropki repo serve ^
+--host 127.0.0.1 ^
+--port 18080 ^
+--db-path pki\micropki.db ^
+--cert-dir pki\certs
+
+Пояснение:
+Запускает HTTP repository.
+Этот процесс работает до Ctrl+C.
+
+27. ПРОВЕРИТЬ REPOSITORY ЧЕРЕЗ CURL
+
+---
+
+В другом окне CMD:
+
+curl http://127.0.0.1:18080/ca/root
+
+curl http://127.0.0.1:18080/ca/intermediate
+
+Пояснение:
+Проверяется, что repository отдаёт сертификаты CA.
+
+28. ПОЛУЧИТЬ СЕРТИФИКАТ ПО SERIAL ЧЕРЕЗ HTTP
+
+---
+
+curl http://127.0.0.1:18080/certificate/SERIAL_HEX
+
+Пояснение:
+Возвращает сертификат из базы по serial number.
+
+29. ОТОЗВАТЬ СЕРТИФИКАТ
+
+---
+
+py -m micropki ca revoke SERIAL_HEX --reason keycompromise --force
+
+Пояснение:
+Меняет статус сертификата на revoked.
+
+30. ПРОВЕРИТЬ, ЧТО СЕРТИФИКАТ ОТОЗВАН
+
+---
+
+py -m micropki ca check-revoked SERIAL_HEX
+
+Ожидаемый результат:
+
+Certificate SERIAL_HEX is REVOKED ...
+
+Пояснение:
+Проверяется статус сертификата в базе.
+
+31. СГЕНЕРИРОВАТЬ CRL
+
+---
+
+py -m micropki ca gen-crl --ca intermediate --out-dir pki
+
+Пояснение:
+Создаётся CRL:
+
+pki\crl\intermediate.crl.pem
+
+32. ПОСМОТРЕТЬ CRL
+
+---
+
+openssl crl -in pki\crl\intermediate.crl.pem -text -noout
+
+Пояснение:
+Показывает содержимое CRL.
+
+33. ПРОВЕРИТЬ CRL
+
+---
+
+openssl crl -in pki\crl\intermediate.crl.pem -CAfile pki\certs\intermediate.cert.pem -noout
+
+Ожидаемый результат:
+
+verify OK
+
+Пояснение:
+Проверяется подпись CRL.
+
+34. ПОЛУЧИТЬ CRL ЧЕРЕЗ HTTP
+
+---
+
+curl http://127.0.0.1:18080/crl --output intermediate.crl.pem
+
+Пояснение:
+Проверяется, что HTTP repository отдаёт CRL.
+
+35. ЗАПУСТИТЬ OCSP RESPONDER
+
+---
+
+py -m micropki ocsp serve ^
+--host 127.0.0.1 ^
+--port 18081 ^
+--db-path pki\micropki.db ^
+--responder-cert pki\certs\OCSP_Responder.cert.pem ^
+--responder-key pki\certs\OCSP_Responder.key.pem ^
+--ca-cert pki\certs\intermediate.cert.pem
+
+Пояснение:
+Запускает OCSP responder на:
+
+http://127.0.0.1:18081/ocsp
+
+Процесс работает до Ctrl+C.
+
+36. СОБРАТЬ TLS CHAIN-ФАЙЛ
+
+---
+
+copy /b pki\certs\localhost.cert.pem+pki\certs\intermediate.cert.pem pki\certs\localhost.chain.pem
+
+Пояснение:
+Создаётся chain-файл для TLS-сервера.
+
+37. ЗАПУСТИТЬ TLS-СЕРВЕР ЧЕРЕЗ OPENSSL
+
+---
+
+openssl s_server -accept 18443 -cert pki\certs\localhost.chain.pem -key pki\certs\localhost.key.pem -www
+
+Пояснение:
+Запускает тестовый TLS-сервер на порту 18443.
+
+Процесс работает до Ctrl+C.
+
+38. ПРОВЕРИТЬ TLS ЧЕРЕЗ CURL
+
+---
+
+В другом окне CMD:
+
+curl --cacert pki\certs\ca.cert.pem https://localhost:18443/
+
+Пояснение:
+Проверяется, что curl доверяет сертификату, если передан Root CA.
+
+39. ПРОВЕРИТЬ TLS БЕЗ ROOT CA
+
+---
+
+curl https://localhost:18443/
+
+Ожидаемый результат:
+curl должен показать ошибку проверки сертификата.
+
+Пояснение:
+Показывает, что без указания Root CA сертификат не является доверенным.
+
+40. ПРОВЕРИТЬ TLS С CRL
+
+---
+
+После отзыва localhost-сертификата и генерации CRL:
+
+curl --cacert pki\certs\ca.cert.pem --crlfile pki\crl\intermediate.crl.pem https://localhost:18443/
+
+Ожидаемый результат:
+curl должен отклонить отозванный сертификат.
+
+Пояснение:
+Демонстрируется revocation checking.
+
+41. CODE SIGNING: СОЗДАТЬ ФАЙЛ
+
+---
+
+echo print("hello from signed script")> demo_script.py
+
+Пояснение:
+Создаётся тестовый файл для подписи.
+
+42. CODE SIGNING: ПОДПИСАТЬ ФАЙЛ
+
+---
+
+openssl dgst -sha256 -sign pki\certs\Demo_Code_Signer.key.pem -out demo_script.py.sig demo_script.py
+
+Пояснение:
+Создаётся detached signature для файла.
+
+43. CODE SIGNING: ИЗВЛЕЧЬ PUBLIC KEY
+
+---
+
+openssl x509 -in pki\certs\Demo_Code_Signer.cert.pem -pubkey -noout > code_signer_pubkey.pem
+
+Пояснение:
+Из code signing certificate извлекается открытый ключ.
+
+44. CODE SIGNING: ПРОВЕРИТЬ ПОДПИСЬ
+
+---
+
+openssl dgst -sha256 -verify code_signer_pubkey.pem -signature demo_script.py.sig demo_script.py
+
+Ожидаемый результат:
+
+Verified OK
+
+Пояснение:
+Проверяется корректность цифровой подписи.
+
+45. CODE SIGNING: ИЗМЕНИТЬ ФАЙЛ
+
+---
+
+echo #tampered>> demo_script.py
+
+Пояснение:
+Имитируется изменение файла после подписи.
+
+46. CODE SIGNING: ПРОВЕРИТЬ ПРОВАЛ ПОДПИСИ
+
+---
+
+openssl dgst -sha256 -verify code_signer_pubkey.pem -signature demo_script.py.sig demo_script.py
+
+Ожидаемый результат:
+
+Verification failure
+
+Пояснение:
+После изменения файла подпись больше не должна проходить проверку.
+
+47. ПРОВЕРИТЬ AUDIT LOG
+
+---
+
+py -m micropki audit verify --log-file pki\audit.log
+
+Пояснение:
+Проверяется целостность audit log.
+
+48. ЗАПУСТИТЬ ФИНАЛЬНОЕ ДЕМО
+
+---
+
+bash ./demo/demo.sh
+
+Пояснение:
+Это Bash-демо. На Windows его нужно запускать через Git Bash, WSL или bash из CMD/PyCharm terminal.
+
+Внутри demo.sh Python должен находиться автоматически:
+python3, python, py -3 или py.
+
+49. СОЗДАТЬ GIT-ТЕГ v1.0.0
+
+---
+
+git status
+
+git add README.md demo\demo.sh micropki tests
+
+git commit -m "Finalize MicroPKI Sprint 8 coursework"
+
+git tag -a v1.0.0 -m "MicroPKI final Sprint 8 release"
+
+git push origin main
+
+git push origin v1.0.0
+
+Если ветка называется master:
+
+git push origin master
+
+git push origin v1.0.0
+
+Пояснение:
+Создаётся финальный релизный тег v1.0.0.
+
+50. МИНИМАЛЬНАЯ ПРОВЕРКА ПЕРЕД ЗАЩИТОЙ
+
+---
+
+cd C:\Users\User\Documents\GitHub\MicroPKI
+
+..venv\Scripts\activate.bat
+
+py -c "import micropki; print('import ok')"
+
+py -m micropki --help
+
+py -m pytest -q
+
+py -m pytest --cov=micropki --cov-report=term-missing
+
+bash ./demo/demo.sh
+
+git tag
+
+git status
+
+Пояснение:
+Если этот набор команд проходит, проект готов к демонстрации.
+
+51. ЕСЛИ НУЖНО БЫСТРО ОЧИСТИТЬ PKI-ПАПКУ
+
+---
+
+rmdir /s /q pki
+
+Пояснение:
+Удаляет папку pki со всеми созданными сертификатами, ключами, базой и CRL.
+
+После этого можно заново выполнить команды с Root CA.
+
+52. CMD-АНАЛОГИ ВАЖНЫХ КОМАНД
+
+---
+
+Создать папку:
+
+mkdir pki\secrets
+
+Записать файл:
+
+echo RootPass123!> pki\secrets\root.pass
+
+Удалить папку:
+
+rmdir /s /q pki
+
+Посмотреть файлы:
+
+dir pki
+
+Склеить файлы:
+
+copy /b file1+file2 output
+
+Остановить сервер:
+
+Ctrl+C
+
+Пояснение:
+Это базовые команды CMD, которые используются во время ручной демонстрации.
+
+53. ЧАСТЫЕ ОШИБКИ В CMD
+
+---
+
+Ошибка:
+the following arguments are required: --subject, --passphrase-file
+
+Причина:
+Команда была оборвана. Скорее всего, перенос строки написан неправильно.
+
+Решение:
+В CMD использовать ^ в конце каждой строки.
+После ^ не должно быть пробела.
+
+Ошибка:
+Отсутствует выражение после унарного оператора "--"
+
+Причина:
+Команда с ^ была запущена в PowerShell, а не в CMD.
+
+Решение:
+Открыть cmd.exe или терминал PyCharm в режиме Command Prompt.
+
+Ошибка:
+intermediate.cert.pem not found
+
+Причина:
+Команда issue-intermediate раньше упала.
+
+Решение:
+Проверить вывод выше и убедиться, что Root CA успешно создан.
+
+Ошибка:
+Certificate object has no attribute not_valid_before_utc
+
+Решение:
+Обновить cryptography:
+
+py -m pip install --upgrade cryptography
+
+или применить compatibility patch.
+
+Ошибка:
+unsupported operand type(s) for |: 'type' and 'NoneType'
+
+Причина:
+Проект запускается на Python 3.8, а в коде есть аннотации Python 3.10 вида str | None.
+
+Решение:
+Добавить в начало соответствующего .py файла:
+
+from **future** import annotations
+
+или заменить str | None на Optional[str].

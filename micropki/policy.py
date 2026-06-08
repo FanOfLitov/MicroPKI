@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 import logging
