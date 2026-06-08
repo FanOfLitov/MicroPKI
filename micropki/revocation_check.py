@@ -6,15 +6,34 @@ from urllib.parse import urlparse
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509 import ocsp as x509_ocsp
+from cryptography.x509.oid import AuthorityInformationAccessOID
 
 logger = logging.getLogger(__name__)
+
+def _crl_next_update_utc(crl: x509.CertificateRevocationList):
+    value = getattr(crl, "next_update_utc", None)
+    if value is None:
+        value = crl.next_update
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+    return value
+
+
+def _revoked_date_utc(revoked_cert: x509.RevokedCertificate):
+    value = getattr(revoked_cert, "revocation_date_utc", None)
+    if value is None:
+        value = revoked_cert.revocation_date
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+    return value
+
 
 
 def extract_ocsp_url(cert: x509.Certificate) -> str | None:
     try:
         aia = cert.extensions.get_extension_for_class(x509.AuthorityInformationAccess).value
         for desc in aia:
-            if desc.access_method == x509.AuthorityInformationAccessOID.OCSP:
+            if desc.access_method == AuthorityInformationAccessOID.OCSP:
                 return desc.access_location.value
     except x509.ExtensionNotFound:
         pass
@@ -109,8 +128,8 @@ def _check_crl(
             return None, None, None
 
         now = datetime.datetime.now(datetime.timezone.utc)
-        if crl.next_update_utc and crl.next_update_utc < now:
-            logger.warning("CRL is expired (next_update: %s)", crl.next_update_utc)
+        if _crl_next_update_utc(crl) and _crl_next_update_utc(crl) < now:
+            logger.warning("CRL is expired (next_update: %s)", _crl_next_update_utc(crl))
             # Proceed anyway as per requirement: "may still be used"
 
         revoked_cert = crl.get_revoked_certificate_by_serial_number(cert.serial_number)
@@ -121,7 +140,7 @@ def _check_crl(
                 reason = crl_reason.value.reason.name
             except x509.ExtensionNotFound:
                 pass
-            return "revoked", reason, revoked_cert.revocation_date_utc
+            return "revoked", reason, _revoked_date_utc(revoked_cert)
         else:
             return "good", None, None
 

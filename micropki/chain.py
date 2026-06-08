@@ -13,6 +13,7 @@ import datetime
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa, padding
+from .certificates import cert_not_before_utc, cert_not_after_utc
 
 
 class ChainValidationError(Exception):
@@ -56,15 +57,15 @@ def validate_chain(
 def _check_validity_period(
     cert: x509.Certificate, at_time: datetime.datetime
 ) -> None:
-    if at_time < cert.not_valid_before_utc:
+    if at_time < cert_not_before_utc(cert):
         raise ChainValidationError(
             f"Certificate not yet valid: {cert.subject.rfc4514_string()} "
-            f"(not before {cert.not_valid_before_utc})"
+            f"(not before {cert_not_before_utc(cert)})"
         )
-    if at_time > cert.not_valid_after_utc:
+    if at_time > cert_not_after_utc(cert):
         raise ChainValidationError(
             f"Certificate has expired: {cert.subject.rfc4514_string()} "
-            f"(not after {cert.not_valid_after_utc})"
+            f"(not after {cert_not_after_utc(cert)})"
         )
 
 

@@ -17,6 +17,8 @@ from .certificates import (
     load_certificate,
     save_certificate,
     serialize_certificate,
+    cert_not_before_utc,
+    cert_not_after_utc,
     sign_end_entity_certificate,
     sign_intermediate_certificate,
 )
@@ -114,8 +116,8 @@ def _write_policy(
     """Write a human-readable policy.txt."""
     subject = cert.subject.rfc4514_string()
     serial_hex = format(cert.serial_number, "X")
-    not_before = cert.not_valid_before_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-    not_after = cert.not_valid_after_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    not_before = cert_not_before_utc(cert).strftime("%Y-%m-%d %H:%M:%S UTC")
+    not_after = cert_not_after_utc(cert).strftime("%Y-%m-%d %H:%M:%S UTC")
     algo_label = f"{key_type.upper()}-{key_size}"
     creation_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -210,8 +212,8 @@ def issue_intermediate_ca(
     serial_hex = format(inter_cert.serial_number, "X")
     subject_dn = inter_cert.subject.rfc4514_string()
     issuer_dn = inter_cert.issuer.rfc4514_string()
-    not_before = inter_cert.not_valid_before_utc.isoformat()
-    not_after = inter_cert.not_valid_after_utc.isoformat()
+    not_before = cert_not_before_utc(inter_cert).isoformat()
+    not_after = cert_not_after_utc(inter_cert).isoformat()
     cert_pem_bytes = serialize_certificate(inter_cert)
     cert_pem_text = cert_pem_bytes.decode("utf-8")
 
@@ -274,8 +276,8 @@ def _append_intermediate_policy(
     """Append Intermediate CA information to the policy document."""
     subject = inter_cert.subject.rfc4514_string()
     serial_hex = format(inter_cert.serial_number, "X")
-    not_before = inter_cert.not_valid_before_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-    not_after = inter_cert.not_valid_after_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    not_before = cert_not_before_utc(inter_cert).strftime("%Y-%m-%d %H:%M:%S UTC")
+    not_after = cert_not_after_utc(inter_cert).strftime("%Y-%m-%d %H:%M:%S UTC")
     issuer = root_cert.subject.rfc4514_string()
     algo_label = f"{key_type.upper()}-{key_size}"
 
@@ -421,8 +423,8 @@ def issue_certificate(
     serial_hex = format(cert.serial_number, "X")
     subject_dn = cert.subject.rfc4514_string()
     issuer_dn = cert.issuer.rfc4514_string()
-    not_before = cert.not_valid_before_utc.isoformat()
-    not_after = cert.not_valid_after_utc.isoformat()
+    not_before = cert_not_before_utc(cert).isoformat()
+    not_after = cert_not_after_utc(cert).isoformat()
 
     cert_pem_bytes = serialize_certificate(cert)
     cert_pem_text = cert_pem_bytes.decode("utf-8")
@@ -624,8 +626,8 @@ def issue_ocsp_certificate(
     serial_hex = format(cert.serial_number, "X")
     subject_dn = cert.subject.rfc4514_string()
     issuer_dn = cert.issuer.rfc4514_string()
-    not_before_str = cert.not_valid_before_utc.isoformat()
-    not_after_str = cert.not_valid_after_utc.isoformat()
+    not_before_str = cert_not_before_utc(cert).isoformat()
+    not_after_str = cert_not_after_utc(cert).isoformat()
     cert_pem_bytes = serialize_certificate(cert)
     cert_pem_text = cert_pem_bytes.decode("utf-8")
 

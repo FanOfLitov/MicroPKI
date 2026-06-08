@@ -30,6 +30,29 @@ _OID_MAP = {
     "EMAILADDRESS": NameOID.EMAIL_ADDRESS,
 }
 
+def _ensure_utc(dt: datetime.datetime) -> datetime.datetime:
+    """Return timezone-aware UTC datetime for old/new cryptography versions."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def cert_not_before_utc(cert: x509.Certificate) -> datetime.datetime:
+    """Compatibility wrapper for cert.not_valid_before_utc / cert.not_valid_before."""
+    value = getattr(cert, "not_valid_before_utc", None)
+    if value is None:
+        value = cert.not_valid_before
+    return _ensure_utc(value)
+
+
+def cert_not_after_utc(cert: x509.Certificate) -> datetime.datetime:
+    """Compatibility wrapper for cert.not_valid_after_utc / cert.not_valid_after."""
+    value = getattr(cert, "not_valid_after_utc", None)
+    if value is None:
+        value = cert.not_valid_after
+    return _ensure_utc(value)
+
+
 
 def build_x509_name(dn: dict[str, str]) -> x509.Name:
     """Convert a parsed DN dict into an :class:`x509.Name`."""
